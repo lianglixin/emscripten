@@ -60,7 +60,7 @@ class AsmModule():
 
     # funcs
     self.funcs_js = self.js[self.start_funcs:self.end_funcs]
-    self.funcs = set([m.group(1) for m in js_optimizer.func_sig.finditer(self.funcs_js)])
+    self.funcs = sorted(set([m.group(1) for m in js_optimizer.func_sig.finditer(self.funcs_js)]))
     #print 'funcs', self.funcs
 
     # tables and exports
@@ -89,7 +89,7 @@ class AsmModule():
   def relocate_into(self, main):
     # heap initializer
     if self.staticbump > 0:
-      new_mem_init = self.mem_init_js[:self.mem_init_js.rfind(', ')] + ', Runtime.GLOBAL_BASE+%d)' % main.staticbump
+      new_mem_init = self.mem_init_js[:self.mem_init_js.rfind(', ')] + ', GLOBAL_BASE+%d)' % main.staticbump
       main.set_pre_js(main.staticbump + self.staticbump, new_mem_init)
 
     # Find function name replacements TODO: do not rename duplicate names with duplicate contents, just merge them
@@ -241,9 +241,9 @@ class AsmModule():
         rep = replacements[key]
         return 'var %s = Module["%s"] = asm["%s"];\n' % (rep, rep, rep)
       return deff
-    my_module_defs = list(map(rep_def, self.module_defs))
+    my_module_defs = [rep_def(x) for x in self.module_defs]
     new_module_defs = set(my_module_defs).difference(main.module_defs)
-    if len(new_module_defs) > 0:
+    if len(new_module_defs):
       position = main.post_js.find('Runtime.') # Runtime is the start of the hardcoded ones
       main.post_js = main.post_js[:position] + ''.join(list(new_module_defs)) + '\n' + main.post_js[position:]
 

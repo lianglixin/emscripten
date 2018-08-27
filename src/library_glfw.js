@@ -473,7 +473,7 @@ var LibraryGLFW = {
 
       if (event.target != Module["canvas"]) return;
 
-      eventButton = GLFW.DOMToGLFWMouseButton(event);
+      var eventButton = GLFW.DOMToGLFWMouseButton(event);
 
       if (status == 1) { // GLFW_PRESS
         GLFW.active.buttons |= (1 << eventButton);
@@ -539,7 +539,7 @@ var LibraryGLFW = {
 
       var resizeNeeded = true;
 
-      // If the client is requestiong fullscreen mode
+      // If the client is requesting fullscreen mode
       if (document["fullscreen"] || document["fullScreen"] || document["mozFullScreen"] || document["webkitIsFullScreen"]) {
         GLFW.active.storedX = GLFW.active.x;
         GLFW.active.storedY = GLFW.active.y;
@@ -610,7 +610,7 @@ var LibraryGLFW = {
     },
 
     requestFullScreen: function() {
-      Module.printErr('GLFW.requestFullScreen() is deprecated. Please call GLFW.requestFullscreen instead.');
+      err('GLFW.requestFullScreen() is deprecated. Please call GLFW.requestFullscreen instead.');
       GLFW.requestFullScreen = function() {
         return GLFW.requestFullscreen();
       }
@@ -627,7 +627,7 @@ var LibraryGLFW = {
     },
 
     cancelFullScreen: function() {
-      Module.printErr('GLFW.cancelFullScreen() is deprecated. Please call GLFW.exitFullscreen instead.');
+      err('GLFW.cancelFullScreen() is deprecated. Please call GLFW.exitFullscreen instead.');
       GLFW.cancelFullScreen = function() {
         return GLFW.exitFullscreen();
       }
@@ -774,7 +774,7 @@ var LibraryGLFW = {
           }
 
           var data = e.target.result;
-          FS.writeFile(path, new Uint8Array(data), { encoding: 'binary' });
+          FS.writeFile(path, new Uint8Array(data));
           if (++written === count) {
             Module['dynCall_viii'](GLFW.active.dropFunc, GLFW.active.id, count, filenames);
 
@@ -996,6 +996,10 @@ var LibraryGLFW = {
           stencil: (GLFW.hints[0x00021006] > 0),   // GLFW_STENCIL_BITS
           alpha: (GLFW.hints[0x00021004] > 0)      // GLFW_ALPHA_BITS 
         }
+#if OFFSCREEN_FRAMEBUFFER
+        // TODO: Make GLFW explicitly aware of whether it is being proxied or not, and set these to true only when proxying is being performed.
+        GL.enableOffscreenFramebufferAttributes(contextAttributes);
+#endif
         Module.ctx = Browser.createContext(Module['canvas'], true, true, contextAttributes);
       }
 
@@ -1040,7 +1044,7 @@ var LibraryGLFW = {
     },
 
     GLFW2ParamToGLFW3Param: function(param) {
-      table = {
+      var table = {
         0x00030001:0, // GLFW_MOUSE_CURSOR
         0x00030002:0, // GLFW_STICKY_KEYS
         0x00030003:0, // GLFW_STICKY_MOUSE_BUTTONS
@@ -1551,7 +1555,7 @@ var LibraryGLFW = {
   glfwMakeContextCurrent: function(winid) {},
 
   glfwGetCurrentContext: function() {
-    return GLFW.active.id;
+    return GLFW.active ? GLFW.active.id : 0;
   },
 
   glfwSwapBuffers: function(winid) {
@@ -1703,7 +1707,7 @@ var LibraryGLFW = {
     for (var i in arg) {
       str += 'i';
     }
-    Runtime.dynCall(str, fun, arg);
+    dynCall(str, fun, arg);
     // One single thread
     return 0;
   },

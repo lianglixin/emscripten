@@ -176,7 +176,7 @@ def print_applist(applist, running_app_manifests, print_removable):
 
 def adb_devices():
   try:
-    devices = subprocess.check_output([ADB, 'devices'])
+    devices = run_process([ADB, 'devices'], check=True, stdout=subprocess.PIPE).stdout
     devices = devices.strip().split('\n')[1:]
     devices = [x.strip().split('\t') for x in devices]
     return devices
@@ -184,10 +184,10 @@ def adb_devices():
     return []
 
 def b2g_get_prefs_filename():
-  return subprocess.check_output([ADB, 'shell', 'echo', '-n', '/data/b2g/mozilla/*.default/prefs.js'])
+  return run_process([ADB, 'shell', 'echo', '-n', '/data/b2g/mozilla/*.default/prefs.js'], check=True, stdout=subprocess.PIPE).stdout
 
 def b2g_get_prefs_data():
-  return subprocess.check_output([ADB, 'shell', 'cat', '/data/b2g/mozilla/*.default/prefs.js'])
+  return run_process([ADB, 'shell', 'cat', '/data/b2g/mozilla/*.default/prefs.js'], check=True, stdout=subprocess.PIPE).stdout
 
 def b2g_get_pref(sub):
   prefs_data = b2g_get_prefs_data().split('\n')
@@ -544,7 +544,7 @@ def main():
     if sys.argv[i] in options: sys.argv[i] = ''
     if sys.argv[i] in options_with_value: sys.argv[i+1] = ''
 
-  sys.argv = [x for x in sys.argv if len(x) > 0]
+  sys.argv = [x for x in sys.argv if len(x)]
 
   # Double-check that the device is found via adb:
   if (HOST == 'localhost' or HOST == '127.0.0.1') and not connect_to_simulator:

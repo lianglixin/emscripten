@@ -87,14 +87,18 @@ void test() {
 
   // emscripten uses 'musl' what is an implementation of the standard library for Linux-based systems
 #if defined(__linux__) || defined(__EMSCRIPTEN__)
-  assert(errno == EISDIR);
+  // Here errno is supposed to be EISDIR, but it is EPERM for NODERAWFS on macOS.
+  // See issue #6121.
+  assert(errno == EISDIR || errno == EPERM);
 #else
   assert(errno == EPERM);
 #endif
 
+#ifndef SKIP_ACCESS_TESTS
   err = unlink("dir-readonly/anotherfile");
   assert(err == -1);
   assert(errno == EACCES);
+#endif
 
 #ifndef NO_SYMLINK
   // try unlinking the symlink first to make sure
@@ -125,9 +129,11 @@ void test() {
   assert(err == -1);
   assert(errno == ENOTDIR);
 
+#ifndef SKIP_ACCESS_TESTS
   err = rmdir("dir-readonly/anotherdir");
   assert(err == -1);
   assert(errno == EACCES);
+#endif
 
   err = rmdir("dir-full");
   assert(err == -1);
@@ -139,14 +145,19 @@ void test() {
   getcwd(buffer, sizeof(buffer));
   err = rmdir(buffer);
   assert(err == -1);
+#ifdef NODERAWFS
+  assert(errno == ENOTEMPTY);
+#else
   assert(errno == EBUSY);
+#endif
 #endif
   err = rmdir("/");
   assert(err == -1);
 #ifdef __APPLE__
   assert(errno == EISDIR);
 #else
-  assert(errno == EBUSY);
+  // errno is EISDIR for NODERAWFS on macOS. See issue #6121.
+  assert(errno == EBUSY || errno == EISDIR);
 #endif
 
 #ifndef NO_SYMLINK

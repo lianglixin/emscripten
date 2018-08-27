@@ -9,9 +9,14 @@ with this tool. Then just include the generated js for each and they will load
 the data and prepare it accordingly. This allows you to share assets and reduce
 data downloads.
 
+ * If you run this yourself, separately/standalone from emcc, then the main program
+   compiled by emcc must be built with filesystem support. You can do that with
+   -s FORCE_FILESYSTEM=1 (if you forget that, an unoptimized build or one with
+   ASSERTIONS enabled will show an error suggesting you use that flag).
+
 Usage:
 
-  file_packager.py TARGET [--preload A [B..]] [--embed C [D..]] [--exclude E [F..]] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--indexedDB-name=EM_PRELOAD_CACHE] [--no-heap-copy] [--separate-metadata] [--lz4] [--use-preload-plugins]
+  file_packager.py TARGET [--preload A [B..]] [--embed C [D..]] [--exclude E [F..]]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--indexedDB-name=EM_PRELOAD_CACHE] [--no-heap-copy] [--separate-metadata] [--lz4] [--use-preload-plugins]
 
   --preload  ,
   --embed    See emcc --help for more details on those options.
@@ -19,19 +24,11 @@ Usage:
   --exclude E [F..] Specifies filename pattern matches to use for excluding given files from being added to the package.
                     See https://docs.python.org/2/library/fnmatch.html for syntax.
 
-  --no-closure In general, the file packager emits closure compiler-compatible code, which requires an eval().
-               With this flag passed, we avoid emitting the eval. emcc passes this flag by default whenever
-               it knows that closure is not run.
-
-  --crunch=X Will compress dxt files to crn with quality level X. The crunch commandline tool must be present
-             and CRUNCH should be defined in ~/.emscripten that points to it. JS crunch decompressing code will
-             be added to convert the crn to dds in the browser.
-             crunch-worker.js will be generated in the current directory. You should include that file when
-             packaging your site.
-             DDS files will not be crunched if the .crn is more recent than the .dds. This prevents a lot of
-             unneeded computation.
+  --from-emcc Indicate that `file_packager.py` was called from `emcc.py` and will be further processed by it, so some code generation can be skipped here
 
   --js-output=FILE Writes output in FILE, if not specified, standard output is used.
+
+  --export-name=EXPORT_NAME Use custom export name (default is `Module`)
 
   --no-force Don't create output if no valid input file is specified.
 
@@ -55,9 +52,6 @@ Notes:
 
   * The file packager generates unix-style file paths. So if you are on windows and a file is accessed at
     subdir\file, in JS it will be subdir/file. For simplicity we treat the web platform as a *NIX.
-
-TODO:        You can also provide .crn files yourself, pre-crunched. With this option, they will be decompressed
-             to dds files in the browser, exactly the same as if this tool compressed them.
 '''
 
 from __future__ import print_function
@@ -71,14 +65,14 @@ if __name__ == '__main__':
 
 import posixpath
 from tools import shared
-from tools.shared import execute, suffix, unsuffixed
+from tools.shared import suffix, unsuffixed
 from tools.jsrun import run_js
 from subprocess import Popen, PIPE, STDOUT
 import fnmatch
 import json
 
 if len(sys.argv) == 1:
-  print('''Usage: file_packager.py TARGET [--preload A...] [--embed B...] [--exclude C...] [--no-closure] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--no-heap-copy] [--separate-metadata]
+  print('''Usage: file_packager.py TARGET [--preload A...] [--embed B...] [--exclude C...] [--no-closure]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache] [--no-heap-copy] [--separate-metadata]
 See the source for more details.''')
   sys.exit(0)
 
@@ -89,8 +83,6 @@ data_target = sys.argv[1]
 IMAGE_SUFFIXES = ('.jpg', '.png', '.bmp')
 AUDIO_SUFFIXES = ('.ogg', '.wav', '.mp3')
 AUDIO_MIMETYPES = { 'ogg': 'audio/ogg', 'wav': 'audio/wav', 'mp3': 'audio/mpeg' }
-CRUNCH_INPUT_SUFFIX = '.dds'
-CRUNCH_OUTPUT_SUFFIX = '.crn'
 
 DDS_HEADER_SIZE = 128
 
@@ -98,15 +90,15 @@ AV_WORKAROUND = 0 # Set to 1 to randomize file order and add some padding, to wo
 
 data_files = []
 excluded_patterns = []
+export_name = 'Module'
 leading = ''
 has_preloaded = False
 compress_cnt = 0
-crunch = 0
 plugins = []
 jsoutput = None
-no_closure = False
+from_emcc = False
 force = True
-# If set to True, IndexedDB (IDBFS in library_idbfs.js) is used to locally cache VFS XHR so that subsequent 
+# If set to True, IndexedDB (IDBFS in library_idbfs.js) is used to locally cache VFS XHR so that subsequent
 # page loads can read the data from the offline cache instead.
 use_preload_cache = False
 indexeddb_name = 'EM_PRELOAD_CACHE'
@@ -151,16 +143,12 @@ for arg in sys.argv[2:]:
   elif arg.startswith('--js-output'):
     jsoutput = arg.split('=', 1)[1] if '=' in arg else None
     leading = ''
-  elif arg.startswith('--no-closure'):
-    no_closure = True
+  elif arg.startswith('--export-name'):
+    if '=' in arg:
+      export_name = arg.split('=', 1)[1]
     leading = ''
-  elif arg.startswith('--crunch'):
-    try:
-      from tools.shared import CRUNCH
-    except Exception as e:
-      print('could not import CRUNCH (make sure it is defined properly in ' + shared.hint_config_file_location() + ')', file=sys.stderr)
-      raise e
-    crunch = arg.split('=', 1)[1] if '=' in arg else '128'
+  elif arg.startswith('--from-emcc'):
+    from_emcc = True
     leading = ''
   elif arg.startswith('--plugin'):
     plugin = open(arg.split('=', 1)[1], 'r').read()
@@ -170,7 +158,7 @@ for arg in sys.argv[2:]:
     mode = leading
     at_position = arg.replace('@@', '__').find('@') # position of @ if we're doing 'src@dst'. '__' is used to keep the index same with the original if they escaped with '@@'.
     uses_at_notation = (at_position != -1) # '@@' in input string means there is an actual @ character, a single '@' means the 'src@dst' notation.
-    
+
     if uses_at_notation:
       srcpath = arg[0:at_position].replace('@@', '@') # split around the @
       dstpath = arg[at_position+1:].replace('@@', '@')
@@ -191,17 +179,15 @@ if (not force) and len(data_files) == 0:
 if not has_preloaded or jsoutput == None:
   assert not separate_metadata, 'cannot separate-metadata without both --preloaded files and a specified --js-output'
 
-ret = '''
-var Module;
-'''
-if not no_closure:
-  ret += '''
-if (typeof Module === 'undefined') Module = eval('(function() { try { return Module || {} } catch(e) { return {} } })()');
-'''
-else:
-  ret += '''
-if (typeof Module === 'undefined') Module = {};
-'''
+if not from_emcc:
+  print('Remember to build the main file with  -s FORCE_FILESYSTEM=1  so that it includes support for loading this file package', file=sys.stderr)
+
+ret = ''
+# emcc.py will add this to the output itself, so it is only needed for standalone calls
+if not from_emcc:
+  ret = '''
+var Module = typeof %(EXPORT_NAME)s !== 'undefined' ? %(EXPORT_NAME)s : {};
+''' % {"EXPORT_NAME": export_name}
 
 ret += '''
 if (!Module.expectedDataFileDownloads) {
@@ -223,7 +209,7 @@ code = '''
 def has_hidden_attribute(filepath):
   if sys.platform != 'win32':
     return False
-    
+
   try:
     attrs = ctypes.windll.kernel32.GetFileAttributesW(unicode(filepath))
     assert attrs != -1
@@ -237,16 +223,11 @@ def has_hidden_attribute(filepath):
 def should_ignore(fullname):
   if has_hidden_attribute(fullname):
     return True
-    
+
   for p in excluded_patterns:
     if fnmatch.fnmatch(fullname, p):
       return True
   return False
-
-# Returns the given string with escapes added so that it can safely be placed inside a string in JS code.
-def escape_for_js_string(s):
-  s = s.replace('\\', '/').replace("'", "\\'").replace('"', '\\"')
-  return s
 
 # Expand directories into individual files
 def add(mode, rootpathsrc, rootpathdst):
@@ -279,7 +260,7 @@ for file_ in data_files:
       new_data_files.append(file_)
 data_files = [file_ for file_ in new_data_files if not os.path.isdir(file_['srcpath'])]
 if len(data_files) == 0:
-  print('Nothing to do!', file=sys.stderr) 
+  print('Nothing to do!', file=sys.stderr)
   sys.exit(1)
 
 # Absolutize paths, and check that they make sense
@@ -326,66 +307,6 @@ for file_ in data_files:
 
 metadata = {'files': []}
 
-# Crunch files
-if crunch:
-  shutil.copyfile(shared.path_from_root('tools', 'crunch-worker.js'), 'crunch-worker.js')
-  ret += '''
-    var decrunchWorker = new Worker('crunch-worker.js');
-    var decrunchCallbacks = [];
-    decrunchWorker.onmessage = function(msg) {
-      decrunchCallbacks[msg.data.callbackID](msg.data.data);
-      console.log('decrunched ' + msg.data.filename + ' in ' + msg.data.time + ' ms, ' + msg.data.data.length + ' bytes');
-      decrunchCallbacks[msg.data.callbackID] = null;
-    };
-    function requestDecrunch(filename, data, callback) {
-      decrunchWorker.postMessage({
-        filename: filename,
-        data: new Uint8Array(data),
-        callbackID: decrunchCallbacks.length
-      });
-      decrunchCallbacks.push(callback);
-    }
-'''
-
-  for file_ in data_files:
-    if file_['dstpath'].endswith(CRUNCH_INPUT_SUFFIX):
-      src_dds_name = file_['srcpath']
-      src_crunch_name = unsuffixed(src_dds_name) + CRUNCH_OUTPUT_SUFFIX
-
-      # Preload/embed the .crn version instead of the .dds version, but use the .dds suffix for the target file in the virtual FS.
-      file_['srcpath'] = src_crunch_name
-
-      try:
-        # Do not crunch if crunched version exists and is more recent than dds source
-        crunch_time = os.stat(src_crunch_name).st_mtime
-        dds_time = os.stat(src_dds_name).st_mtime
-        if dds_time < crunch_time: continue
-      except:
-        pass # if one of them does not exist, continue on
-
-      # guess at format. this lets us tell crunch to not try to be clever and use odd formats like DXT5_AGBR
-      try:
-        format = Popen(['file', file_['srcpath']], stdout=PIPE).communicate()[0]
-        if 'DXT5' in format:
-          format = ['-dxt5']
-        elif 'DXT1' in format:
-          format = ['-dxt1']
-        else:
-          raise Exception('unknown format')
-      except:
-        format = []
-      Popen([CRUNCH, '-outsamedir', '-file', src_dds_name, '-quality', crunch] + format, stdout=sys.stderr).communicate()
-      #if not os.path.exists(os.path.basename(crunch_name)):
-      #  print >> sys.stderr, 'Failed to crunch, perhaps a weird dxt format? Looking for a source PNG for the DDS'
-      #  Popen([CRUNCH, '-file', unsuffixed(file_['srcpath']) + '.png', '-quality', crunch] + format, stdout=sys.stderr).communicate()
-      assert os.path.exists(src_crunch_name), 'crunch failed to generate output'
-      # prepend the dds header
-      crunched = open(src_crunch_name, 'rb').read()
-      c = open(src_crunch_name, 'wb')
-      c.write(open(src_dds_name, 'rb').read()[:DDS_HEADER_SIZE])
-      c.write(crunched)
-      c.close()
-
 # Set up folders
 partial_dirs = []
 for file_ in data_files:
@@ -423,7 +344,7 @@ if has_preloaded:
           if (that.audio) {
             Module['removeRunDependency']('fp ' + that.name); // workaround for chromium bug 124926 (still no audio with this, but at least we don't hang)
           } else {
-            Module.printErr('Preloading file ' + that.name + ' failed');
+            err('Preloading file ' + that.name + ' failed');
           }
         }, false, true); // canOwn this data in the filesystem, it is a slide into the heap that will never change
 '''
@@ -434,10 +355,9 @@ if has_preloaded:
 
   # Data requests - for getting a block of data out of the big archive - have a similar API to XHRs
   code += '''
-    function DataRequest(start, end, crunched, audio) {
+    function DataRequest(start, end, audio) {
       this.start = start;
       this.end = end;
-      this.crunched = crunched;
       this.audio = audio;
     }
     DataRequest.prototype = {
@@ -450,9 +370,7 @@ if has_preloaded:
       send: function() {},
       onload: function() {
         var byteArray = this.byteArray.subarray(this.start, this.end);
-%s
-          this.finish(byteArray);
-%s
+        this.finish(byteArray);
       },
       finish: function(byteArray) {
         var that = this;
@@ -461,23 +379,10 @@ if has_preloaded:
       }
     };
 %s
-  ''' % ('' if not crunch else '''
-        if (this.crunched) {
-          var ddsHeader = byteArray.subarray(0, 128);
-          var that = this;
-          requestDecrunch(this.name, byteArray.subarray(128), function(ddsData) {
-            byteArray = new Uint8Array(ddsHeader.length + ddsData.length);
-            byteArray.set(ddsHeader, 0);
-            byteArray.set(ddsData, 128);
-            that.finish(byteArray);
-          });
-        } else {
-''', '' if not crunch else '''
-        }
-''', create_preloaded if use_preload_plugins else create_data, '''
+  ''' % (create_preloaded if use_preload_plugins else create_data, '''
         var files = metadata.files;
         for (var i = 0; i < files.length; ++i) {
-          new DataRequest(files[i].start, files[i].end, files[i].crunched, files[i].audio).open('GET', files[i].filename);
+          new DataRequest(files[i].start, files[i].end, files[i].audio).open('GET', files[i].filename);
         }
 ''' if not lz4 else '')
 
@@ -508,7 +413,6 @@ for file_ in data_files:
       'filename': file_['dstpath'],
       'start': file_['data_start'],
       'end': file_['data_end'],
-      'crunched': 1 if crunch and filename.endswith(CRUNCH_INPUT_SUFFIX) else 0,
       'audio': 1 if filename[-4:] in AUDIO_SUFFIXES else 0,
     })
   else:
@@ -521,7 +425,7 @@ if has_preloaded:
       use_data = '''
         // copy the entire loaded file into a spot in the heap. Files will refer to slices in that. They cannot be freed though
         // (we may be allocating before malloc is ready, during startup).
-        if (Module['SPLIT_MEMORY']) Module.printErr('warning: you should run the file packager with --no-heap-copy when SPLIT_MEMORY is used, otherwise copying into the heap may fail due to the splitting');
+        if (Module['SPLIT_MEMORY']) err('warning: you should run the file packager with --no-heap-copy when SPLIT_MEMORY is used, otherwise copying into the heap may fail due to the splitting');
         var ptr = Module['getMemory'](byteArray.length);
         Module['HEAPU8'].set(byteArray, ptr);
         DataRequest.prototype.byteArray = Module['HEAPU8'].subarray(ptr, ptr+byteArray.length);
@@ -537,7 +441,7 @@ if has_preloaded:
             DataRequest.prototype.requests[files[i].filename].onload();
           }
     '''
-    use_data += "          Module['removeRunDependency']('datafile_%s');\n" % escape_for_js_string(data_target)
+    use_data += "          Module['removeRunDependency']('datafile_%s');\n" % shared.JS.escape_for_js_string(data_target)
 
   else:
     # LZ4FS usage
@@ -551,9 +455,9 @@ if has_preloaded:
           assert(typeof LZ4 === 'object', 'LZ4 not present - was your app build with  -s LZ4=1  ?');
           LZ4.loadPackage({ 'metadata': metadata, 'compressedData': compressedData });
           Module['removeRunDependency']('datafile_%s');
-    ''' % (meta, escape_for_js_string(data_target))
+    ''' % (meta, shared.JS.escape_for_js_string(data_target))
 
-  package_uuid = uuid.uuid4();
+  package_uuid = uuid.uuid4()
   package_name = data_target
   statinfo = os.stat(package_name)
   remote_package_size = statinfo.st_size
@@ -572,12 +476,10 @@ if has_preloaded:
     var REMOTE_PACKAGE_BASE = '%s';
     if (typeof Module['locateFilePackage'] === 'function' && !Module['locateFile']) {
       Module['locateFile'] = Module['locateFilePackage'];
-      Module.printErr('warning: you defined Module.locateFilePackage, that has been renamed to Module.locateFile (using your locateFilePackage for now)');
+      err('warning: you defined Module.locateFilePackage, that has been renamed to Module.locateFile (using your locateFilePackage for now)');
     }
-    var REMOTE_PACKAGE_NAME = typeof Module['locateFile'] === 'function' ?
-                              Module['locateFile'](REMOTE_PACKAGE_BASE) :
-                              ((Module['filePackagePrefixURL'] || '') + REMOTE_PACKAGE_BASE);
-  ''' % (escape_for_js_string(data_target), escape_for_js_string(remote_package_name))
+    var REMOTE_PACKAGE_NAME = Module['locateFile'] ? Module['locateFile'](REMOTE_PACKAGE_BASE, '') : REMOTE_PACKAGE_BASE;
+  ''' % (shared.JS.escape_for_js_string(data_target), shared.JS.escape_for_js_string(remote_package_name))
   metadata['remote_package_size'] = remote_package_size
   metadata['package_uuid'] = str(package_uuid)
   ret += '''
@@ -741,7 +643,7 @@ if has_preloaded:
       %s
     };
     Module['addRunDependency']('datafile_%s');
-  ''' % (use_data, escape_for_js_string(data_target)) # use basename because from the browser's point of view, we need to find the datafile in the same dir as the html file
+  ''' % (use_data, shared.JS.escape_for_js_string(data_target)) # use basename because from the browser's point of view, we need to find the datafile in the same dir as the html file
 
   code += r'''
     if (!Module.preloadResults) Module.preloadResults = {};
@@ -823,43 +725,38 @@ ret += '''
   }
 '''
 
-if crunch:
-  ret += '''
-  if (!Module['postRun']) Module['postRun'] = [];
-  Module["postRun"].push(function() {
-    decrunchWorker.terminate();
-  });
-'''
-
 ret += '''%s
 })();
 ''' % ('''
   Module['removeRunDependency']('%(metadata_file)s');
  }
 
- var REMOTE_METADATA_NAME = typeof Module['locateFile'] === 'function' ?
-                            Module['locateFile']('%(metadata_file)s') :
-                            ((Module['filePackagePrefixURL'] || '') + '%(metadata_file)s');
- var xhr = new XMLHttpRequest();
- xhr.onreadystatechange = function() {
-  if (xhr.readyState === 4 && xhr.status === 200) {
-    loadPackage(JSON.parse(xhr.responseText));
-  }
- }
- xhr.open('GET', REMOTE_METADATA_NAME, true);
- xhr.overrideMimeType('application/json');
- xhr.send(null);
-
- if (!Module['preRun']) Module['preRun'] = [];
- Module["preRun"].push(function() {
+ function runMetaWithFS() {
   Module['addRunDependency']('%(metadata_file)s');
- });
+  var REMOTE_METADATA_NAME = Module['locateFile'] ? Module['locateFile']('%(metadata_file)s', '') : '%(metadata_file)s';
+  var xhr = new XMLHttpRequest();
+  xhr.onreadystatechange = function() {
+   if (xhr.readyState === 4 && xhr.status === 200) {
+     loadPackage(JSON.parse(xhr.responseText));
+   }
+  }
+  xhr.open('GET', REMOTE_METADATA_NAME, true);
+  xhr.overrideMimeType('application/json');
+  xhr.send(null);
+ }
+
+ if (Module['calledRun']) {
+  runMetaWithFS();
+ } else {
+  if (!Module['preRun']) Module['preRun'] = [];
+  Module["preRun"].push(runMetaWithFS);
+ }
 ''' % {'metadata_file': os.path.basename(jsoutput + '.metadata')} if separate_metadata else '''
  }
  loadPackage(%s);
 ''' % json.dumps(metadata))
 
-if force or len(data_files) > 0:
+if force or len(data_files):
   if jsoutput == None:
     print(ret)
   else:

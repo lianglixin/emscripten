@@ -118,7 +118,7 @@ f = open(filename, 'r')
 data = f.read()
 f.close()
 
-if 'declare i32 @printf(' not in data and 'define internal i32 @printf(' not in data:
+if not re.search('(declare.*@printf\(|define.*@printf\()', data):
   POSTAMBLE += '''
 ; [#uses=1]
 declare i32 @printf(i8*, ...)
@@ -255,7 +255,7 @@ for i in range(len(lines)):
           continue
 
   finally:
-    if len(pre) > 0:
+    if len(pre):
       lines[i] = pre + '\n' + lines[i]
       lines_added += 1
 

@@ -20,13 +20,13 @@ def process_shell(js_engine, shell, equivalentfn_hash_info=None):
     f.write(equivalentfn_hash_info)
     f.close()
 
-    (output,error) = subprocess.Popen(js_engine +
+    proc = shared.run_process(js_engine +
         [DUPLICATE_FUNCTION_ELIMINATOR, temp_file, '--use-hash-info', '--no-minimize-whitespace'],
-        stdout=subprocess.PIPE,stderr=subprocess.PIPE).communicate()
-  assert len(output) > 0
-  assert len(error) == 0
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  assert len(proc.stdout)
+  assert len(proc.stderr) == 0
 
-  return output
+  return proc.stdout
 
 def run_on_chunk(command):
   try:
@@ -43,17 +43,15 @@ def run_on_chunk(command):
       print('running DFE command', ' '.join([c if c != filename else saved for c in command]), file=sys.stderr)
       shutil.copyfile(filename, os.path.join(shared.get_emscripten_temp_dir(), saved))
 
-    if shared.EM_BUILD_VERBOSE_LEVEL >= 3: print('run_on_chunk: ' + str(command), file=sys.stderr)
+    if shared.EM_BUILD_VERBOSE >= 3: print('run_on_chunk: ' + str(command), file=sys.stderr)
 
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE)
-    output = proc.communicate()[0]
+    proc = shared.run_process(command, stdout=subprocess.PIPE)
+    output = proc.stdout
     assert proc.returncode == 0, 'Error in optimizer (return code ' + str(proc.returncode) + '): ' + output
-    assert len(output) > 0 and not output.startswith('Assertion failed'), 'Error in optimizer: ' + output
-    filename = temp_files.get(os.path.basename(filename) + '.jo' + file_suffix).name
+    assert len(output) and not output.startswith('Assertion failed'), 'Error in optimizer: ' + output
+    filename = temp_files.get(os.path.basename(filename) + '.dfjo' + file_suffix).name
 
-    # Important to write out in binary mode, because the data we are writing contains Windows line endings '\r\n' because it was PIPED from console.
-    # Otherwise writing \r\n to ascii mode file will result in Windows amplifying \n to \r\n, generating bad \r\r\n line endings.
-    f = open(filename, 'wb')
+    f = open(filename, 'w')
     f.write(output)
     f.close()
     if DEBUG and not shared.WINDOWS: print('.', file=sys.stderr) # Skip debug progress indicator on Windows, since it doesn't buffer well with multiple threads printing to console.
@@ -219,17 +217,17 @@ def run_on_js(filename, gen_hash_info=False):
 
   # if we are making source maps, we want our debug numbering to start from the
   # top of the file, so avoid breaking the JS into chunks
-  cores = int(os.environ.get('EMCC_CORES') or multiprocessing.cpu_count())
+  cores = shared.Building.get_num_cores()
 
   intended_num_chunks = int(round(cores * NUM_CHUNKS_PER_CORE))
   chunk_size = min(MAX_CHUNK_SIZE, max(MIN_CHUNK_SIZE, total_size / intended_num_chunks))
   chunks = shared.chunkify(funcs, chunk_size)
 
-  chunks = [chunk for chunk in chunks if len(chunk) > 0]
-  if DEBUG and len(chunks) > 0: print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(map(len, chunks)), '-', min(map(len, chunks)), file=sys.stderr)
+  chunks = [chunk for chunk in chunks if len(chunk)]
+  if DEBUG and len(chunks): print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(map(len, chunks)), '-', min(map(len, chunks)), file=sys.stderr)
   funcs = None
 
-  if len(chunks) > 0:
+  if len(chunks):
     def write_chunk(chunk, i):
       temp_file = temp_files.get('.jsfunc_%d.js' % i).name
       f = open(temp_file, 'w')
@@ -245,7 +243,7 @@ def run_on_js(filename, gen_hash_info=False):
     filenames = []
 
   old_filenames = filenames[:]
-  if len(filenames) > 0:
+  if len(filenames):
     commands = [js_engine + [DUPLICATE_FUNCTION_ELIMINATOR, filename, '--gen-hash-info' if gen_hash_info else '--use-hash-info', '--no-minimize-whitespace'] for filename in filenames]
 
     if DEBUG and commands is not None:
@@ -263,6 +261,10 @@ def run_on_js(filename, gen_hash_info=False):
       filenames = [run_on_chunk(command) for command in commands]
   else:
     filenames = []
+
+  # we create temp files in the child threads, clean them up here when we are done
+  for filename in filenames:
+    temp_files.note(filename)
 
   json_files = []
 
@@ -298,7 +300,7 @@ def run_on_js(filename, gen_hash_info=False):
   # No need to write suffix: if there was one, it is inside post which exists when suffix is there
   f.write('\n')
 
-  if gen_hash_info and len(json_files) > 0:
+  if gen_hash_info and len(json_files):
     write_equivalent_fn_hash_to_file(f, json_files, passed_in_filename)
   f.close()
 

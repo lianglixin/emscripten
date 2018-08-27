@@ -295,7 +295,7 @@ var LibraryGL = {
           var extension = GLctx.getExtension("OES_standard_derivatives");
 #if GL_DEBUG
           if (!extension) {
-            Module.printErr("Shader attempts to use the standard derivatives extension which is not available.");
+            err("Shader attempts to use the standard derivatives extension which is not available.");
           }
 #endif
         }
@@ -350,7 +350,7 @@ var LibraryGL = {
 #if GL_ASSERTIONS
         GL.validateVertexAttribPointer(cb.size, cb.type, cb.stride, 0);
 #endif
-        GLctx.vertexAttribPointer(i, cb.size, cb.type, cb.normalized, cb.stride, 0);
+        cb.vertexAttribPointerAdaptor.call(GLctx, i, cb.size, cb.type, cb.normalized, cb.stride, 0);
       }
     },
 
@@ -497,6 +497,12 @@ var LibraryGL = {
         webGLContextAttributes['minorVersion'] = 0;
       }
 
+#if OFFSCREEN_FRAMEBUFFER
+      // In proxied operation mode, rAF()/setTimeout() functions do not delimit frame boundaries, so can't have WebGL implementation
+      // try to detect when it's ok to discard contents of the rendered backbuffer.
+      if (webGLContextAttributes['renderViaOffscreenBackBuffer']) webGLContextAttributes['preserveDrawingBuffer'] = true;
+#endif
+
 #if GL_TESTING
       webGLContextAttributes['preserveDrawingBuffer'] = true;
 #endif
@@ -530,7 +536,7 @@ var LibraryGL = {
         }
         if (!ctx) throw ':(';
       } catch (e) {
-        Module.print('Could not create canvas: ' + [errorInfo, e, JSON.stringify(webGLContextAttributes)]);
+        out('Could not create canvas: ' + [errorInfo, e, JSON.stringify(webGLContextAttributes)]);
         return 0;
       }
 
@@ -541,6 +547,151 @@ var LibraryGL = {
 #endif
       return context;
     },
+
+#if OFFSCREEN_FRAMEBUFFER
+    enableOffscreenFramebufferAttributes: function(webGLContextAttributes) {
+      webGLContextAttributes.renderViaOffscreenBackBuffer = true;
+      webGLContextAttributes.preserveDrawingBuffer = true;
+    },
+
+    // If WebGL is being proxied from a pthread to the main thread, we can't directly render to the WebGL default back buffer
+    // because of WebGL's implicit swap behavior. Therefore in such modes, create an offscreen render target surface to
+    // which rendering is performed to, and finally flipped to the main screen.
+    createOffscreenFramebuffer: function(context) {
+      var gl = context.GLctx;
+
+      // Create FBO
+      var fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      context.defaultFbo = fbo;
+
+      // Create render targets to the FBO
+      context.defaultColorTarget = gl.createTexture();
+      context.defaultDepthTarget = gl.createRenderbuffer();
+      GL.resizeOffscreenFramebuffer(context); // Size them up correctly (use the same mechanism when resizing on demand)
+
+      gl.bindTexture(gl.TEXTURE_2D, context.defaultColorTarget);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.canvas.width, gl.canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, context.defaultColorTarget, 0);
+      gl.bindTexture(gl.TEXTURE_2D, null);
+
+      // Create depth render target to the FBO
+      var depthTarget = gl.createRenderbuffer();
+      gl.bindRenderbuffer(gl.RENDERBUFFER, context.defaultDepthTarget);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, gl.canvas.width, gl.canvas.height);
+      gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, context.defaultDepthTarget);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+
+      // Create blitter
+      var vertices = [
+        -1, -1,
+        -1,  1,
+         1, -1,
+         1,  1
+      ];
+      var vb = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, null);
+      context.blitVB = vb;
+
+      var vsCode =
+        'attribute vec2 pos;' +
+        'varying lowp vec2 tex;' +
+        'void main() { tex = pos * 0.5 + vec2(0.5,0.5); gl_Position = vec4(pos, 0.0, 1.0); }';
+      var vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, vsCode);
+      gl.compileShader(vs);
+
+      var fsCode =
+        'varying lowp vec2 tex;' +
+        'uniform sampler2D sampler;' +
+        'void main() { gl_FragColor = texture2D(sampler, tex); }';
+      var fs = gl.createShader(gl.FRAGMENT_SHADER);
+      gl.shaderSource(fs, fsCode);
+      gl.compileShader(fs);
+
+      var blitProgram = gl.createProgram();
+      gl.attachShader(blitProgram, vs);
+      gl.attachShader(blitProgram, fs);
+      gl.linkProgram(blitProgram);
+      context.blitProgram = blitProgram;
+      context.blitPosLoc = gl.getAttribLocation(blitProgram, "pos");
+      gl.useProgram(blitProgram);
+      gl.uniform1i(gl.getUniformLocation(blitProgram, "sampler"), 0);
+      gl.useProgram(null);
+    },
+
+    resizeOffscreenFramebuffer: function(context) {
+      var gl = context.GLctx;
+
+      // Resize color buffer
+      if (context.defaultColorTarget) {
+        var prevTextureBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+        gl.bindTexture(gl.TEXTURE_2D, context.defaultColorTarget);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.drawingBufferWidth, gl.drawingBufferHeight, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.bindTexture(gl.TEXTURE_2D, prevTextureBinding);
+      }
+
+      // Resize depth buffer
+      if (context.defaultDepthTarget) {
+        var prevRenderBufferBinding = gl.getParameter(gl.RENDERBUFFER_BINDING);
+        gl.bindRenderbuffer(gl.RENDERBUFFER, context.defaultDepthTarget);
+        gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, gl.drawingBufferWidth, gl.drawingBufferHeight); // TODO: Read context creation parameters for what type of depth and stencil to use
+        gl.bindRenderbuffer(gl.RENDERBUFFER, prevRenderBufferBinding);
+      }
+    },
+
+    // Renders the contents of the offscreen render target onto the visible screen.
+    blitOffscreenFramebuffer: function(context) {
+      var gl = context.GLctx;
+
+      var prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+      var prevProgram = gl.getParameter(gl.CURRENT_PROGRAM);
+      gl.useProgram(context.blitProgram);
+
+      var prevVB = gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+      gl.bindBuffer(gl.ARRAY_BUFFER, context.blitVB);
+
+      gl.vertexAttribPointer(context.blitPosLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(context.blitPosLoc);
+
+      var prevActiveTexture = gl.getParameter(gl.ACTIVE_TEXTURE);
+      gl.activeTexture(gl.TEXTURE0);
+
+      var prevTextureBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+      gl.bindTexture(gl.TEXTURE_2D, context.defaultColorTarget);
+
+      var prevBlend = gl.getParameter(gl.BLEND);
+      if (prevBlend) gl.disable(gl.BLEND);
+
+      var prevCullFace = gl.getParameter(gl.CULL_FACE);
+      if (prevCullFace) gl.disable(gl.CULL_FACE);
+
+      var prevDepthTest = gl.getParameter(gl.DEPTH_TEST);
+      if (prevDepthTest) gl.disable(gl.DEPTH_TEST);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      if (prevDepthTest) gl.enable(gl.DEPTH_TEST);
+      if (prevCullFace) gl.enable(gl.CULL_FACE);
+      if (prevBlend) gl.enable(gl.BLEND);
+
+      gl.bindTexture(gl.TEXTURE_2D, prevTextureBinding);
+      gl.activeTexture(prevActiveTexture);
+      // prevEnableVertexAttribArray?
+      // prevVertexAttribPointer?
+      gl.bindBuffer(gl.ARRAY_BUFFER, prevVB);
+      gl.useProgram(prevProgram);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+    },
+#endif
 
     registerContext: function(ctx, webGLContextAttributes) {
       var handle = GL.getNewId(GL.contexts);
@@ -567,6 +718,16 @@ var LibraryGL = {
       if (typeof webGLContextAttributes['enableExtensionsByDefault'] === 'undefined' || webGLContextAttributes['enableExtensionsByDefault']) {
         GL.initExtensions(context);
       }
+
+#if OFFSCREEN_FRAMEBUFFER
+      if (webGLContextAttributes['renderViaOffscreenBackBuffer']) GL.createOffscreenFramebuffer(context);
+#else
+
+#if GL_DEBUG
+      if (webGLContextAttributes['renderViaOffscreenBackBuffer']) err('renderViaOffscreenBackBuffer=true specified in WebGL context creation attributes, pass linker flag -s OFFSCREEN_FRAMEBUFFER=1 to enable support!');
+#endif
+
+#endif
       return handle;
     },
 
@@ -605,7 +766,7 @@ var LibraryGL = {
 #if FULL_ES2
       context.clientBuffers = [];
       for (var i = 0; i < context.maxVertexAttribs; i++) {
-        context.clientBuffers[i] = { enabled: false, clientside: false, size: 0, type: 0, normalized: 0, stride: 0, ptr: 0 };
+        context.clientBuffers[i] = { enabled: false, clientside: false, size: 0, type: 0, normalized: 0, stride: 0, ptr: 0, vertexAttribPointerAdaptor: null };
       }
 
       GL.generateTempBuffers(false, context);
@@ -648,13 +809,17 @@ var LibraryGL = {
       // As new extensions are ratified at http://www.khronos.org/registry/webgl/extensions/ , feel free to add your new extensions
       // here, as long as they don't produce a performance impact for users that might not be using those extensions.
       // E.g. debugging-related extensions should probably be off by default.
-      var automaticallyEnabledExtensions = [ "OES_texture_float", "OES_texture_half_float", "OES_standard_derivatives",
+      var automaticallyEnabledExtensions = [ // Khronos ratified WebGL extensions ordered by number (no debug extensions):
+                                             "OES_texture_float", "OES_texture_half_float", "OES_standard_derivatives",
                                              "OES_vertex_array_object", "WEBGL_compressed_texture_s3tc", "WEBGL_depth_texture",
-                                             "OES_element_index_uint", "EXT_texture_filter_anisotropic", "ANGLE_instanced_arrays",
-                                             "OES_texture_float_linear", "OES_texture_half_float_linear", "WEBGL_compressed_texture_atc",
-                                             "WEBKIT_WEBGL_compressed_texture_pvrtc", "WEBGL_compressed_texture_pvrtc",
-                                             "EXT_color_buffer_half_float", "WEBGL_color_buffer_float", "EXT_frag_depth", "EXT_sRGB",
-                                             "WEBGL_draw_buffers", "WEBGL_shared_resources", "EXT_shader_texture_lod", "EXT_color_buffer_float"];
+                                             "OES_element_index_uint", "EXT_texture_filter_anisotropic", "EXT_frag_depth",
+                                             "WEBGL_draw_buffers", "ANGLE_instanced_arrays", "OES_texture_float_linear",
+                                             "OES_texture_half_float_linear", "EXT_blend_minmax", "EXT_shader_texture_lod",
+                                             // Community approved WebGL extensions ordered by number:
+                                             "WEBGL_compressed_texture_pvrtc", "EXT_color_buffer_half_float", "WEBGL_color_buffer_float",
+                                             "EXT_sRGB", "WEBGL_compressed_texture_etc1", "EXT_disjoint_timer_query",
+                                             "WEBGL_compressed_texture_etc", "WEBGL_compressed_texture_astc", "EXT_color_buffer_float",
+                                             "WEBGL_compressed_texture_s3tc_srgb", "EXT_disjoint_timer_query_webgl2"];
 
       function shouldEnableAutomatically(extension) {
         var ret = false;
@@ -790,7 +955,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glGetString: Unknown parameter ' + name_ + '!');
+        err('GL_INVALID_ENUM in glGetString: Unknown parameter ' + name_ + '!');
 #endif
         return 0;
     }
@@ -805,7 +970,7 @@ var LibraryGL = {
     // better to report an error instead of doing anything random.
     if (!p) {
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGet' + type + 'v(name=' + name_ + ': Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGet' + type + 'v(name=' + name_ + ': Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -819,7 +984,7 @@ var LibraryGL = {
         if (type !== 'Integer' && type !== 'Integer64') {
           GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-          Module.printErr('GL_INVALID_ENUM in glGet' + type + 'v(GL_SHADER_BINARY_FORMATS): Invalid parameter type!');
+          err('GL_INVALID_ENUM in glGet' + type + 'v(GL_SHADER_BINARY_FORMATS): Invalid parameter type!');
 #endif
         }
         return; // Do not write anything to the out pointer, since no binary formats are supported.
@@ -867,7 +1032,7 @@ var LibraryGL = {
         case "string":
           GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-          Module.printErr('GL_INVALID_ENUM in glGet' + type + 'v(' + name_ + ') on a name which returns a string!');
+          err('GL_INVALID_ENUM in glGet' + type + 'v(' + name_ + ') on a name which returns a string!');
 #endif
           return;
         case "object":
@@ -893,7 +1058,7 @@ var LibraryGL = {
               default: {
                 GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-                Module.printErr('GL_INVALID_ENUM in glGet' + type + 'v(' + name_ + ') and it returns null!');
+                err('GL_INVALID_ENUM in glGet' + type + 'v(' + name_ + ') and it returns null!');
 #endif
                 return;
               }
@@ -927,7 +1092,7 @@ var LibraryGL = {
           } else {
             GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-            Module.printErr('GL_INVALID_ENUM in glGet' + type + 'v: Unknown object returned from WebGL getParameter(' + name_ + ')!');
+            err('GL_INVALID_ENUM in glGet' + type + 'v: Unknown object returned from WebGL getParameter(' + name_ + ')!');
 #endif
             return;
           }
@@ -935,7 +1100,7 @@ var LibraryGL = {
         default:
           GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-          Module.printErr('GL_INVALID_ENUM in glGetIntegerv: Native code calling glGet' + type + 'v(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+          err('GL_INVALID_ENUM in glGetIntegerv: Native code calling glGet' + type + 'v(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
 #endif
           return;
       }
@@ -961,7 +1126,7 @@ var LibraryGL = {
       if (index < 0 || index >= stringiCache.length) {
         GL.recordError(0x0501/*GL_INVALID_VALUE*/);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_VALUE in glGetStringi: index out of range (' + index + ')!');
+        err('GL_INVALID_VALUE in glGetStringi: index out of range (' + index + ')!');
 #endif
         return 0;
       }
@@ -980,7 +1145,7 @@ var LibraryGL = {
         if (index < 0 || index >= stringiCache.length) {
           GL.recordError(0x0501/*GL_INVALID_VALUE*/);
 #if GL_ASSERTIONS
-          Module.printErr('GL_INVALID_VALUE in glGetStringi: index out of range (' + index + ') in a call to GL_EXTENSIONS!');
+          err('GL_INVALID_VALUE in glGetStringi: index out of range (' + index + ') in a call to GL_EXTENSIONS!');
 #endif
           return 0;
         }
@@ -988,7 +1153,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glGetStringi: Unknown parameter ' + name + '!');
+        err('GL_INVALID_ENUM in glGetStringi: Unknown parameter ' + name + '!');
 #endif
         return 0;
     }
@@ -1019,6 +1184,48 @@ var LibraryGL = {
     emscriptenWebGLGet(name_, p, 'Boolean');
   },
 
+#if USE_WEBGL2
+  glGetInternalformativ__sig: 'viiiii',
+  glGetInternalformativ: function(target, internalformat, pname, bufSize, params) {
+    if (bufSize < 0) {
+      GL.recordError(0x0501 /* GL_INVALID_VALUE */);
+#if GL_ASSERTIONS
+      err('GL_INVALID_VALUE in glGetInternalformativ: bufSize=' + bufSize + ' < 0');
+#endif
+      return;
+    }
+    var samples = GLctx['getInternalformatParameter'](target, internalformat, 0x80A9 /*GL_SAMPLES*/);
+    if (!samples) {
+      // probably target != GL_RENDERBUFFER or bad internalformat
+      GL.recordError(0x0500 /* GL_INVALID_ENUM */);
+#if GL_ASSERTIONS
+      err('GL_INVALID_ENUM in glGetInternalformativ');
+#endif
+      return;
+    }
+    switch(pname) {
+      case 0x80A9 /*GL_SAMPLES*/:
+        var n = Math.min(bufSize, samples.length);
+        for (var i = 0; i < n; i++) {
+          var v = samples[i];
+          {{{ makeSetValue('params', 'i*4', 'v', 'i32') }}};
+        }
+        break;
+      case 0x9380 /*GL_NUM_SAMPLE_COUNTS*/:
+        if (bufSize > 1) {
+          var v = samples.length;
+          {{{ makeSetValue('params', '0', 'v', 'i32') }}};
+        }
+        break;
+      default:
+        GL.recordError(0x0500 /* GL_INVALID_ENUM */);
+#if GL_ASSERTIONS
+        err('GL_INVALID_ENUM due to unknown pname in glGetInternalformativ: ' + pname);
+#endif
+    }
+  },
+#endif
+
   glGenTextures__sig: 'vii',
   glGenTextures: function(n, textures) {
     for (var i = 0; i < n; i++) {
@@ -1026,7 +1233,7 @@ var LibraryGL = {
       if (!texture) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */); // GLES + EGL specs don't specify what should happen here, so best to issue an error and create IDs with 0.
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenTextures: GLctx.createTexture returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenTextures: GLctx.createTexture returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('textures', 'i++*4', 0, 'i32') }}};
         return;
@@ -1142,7 +1349,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM due to unknown format in glTex[Sub]Image/glReadPixels, format: ' + format);
+        err('GL_INVALID_ENUM due to unknown format in glTex[Sub]Image/glReadPixels, format: ' + format);
 #endif
         return null;
     }
@@ -1185,7 +1392,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glTex[Sub]Image/glReadPixels, type: ' + type + ', format: ' + format);
+        err('GL_INVALID_ENUM in glTex[Sub]Image/glReadPixels, type: ' + type + ', format: ' + format);
 #endif
         return null;
     }
@@ -1241,7 +1448,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glTex[Sub]Image/glReadPixels, type: ' + type);
+        err('GL_INVALID_ENUM in glTex[Sub]Image/glReadPixels, type: ' + type);
 #endif
         return null;
     }
@@ -1405,7 +1612,7 @@ var LibraryGL = {
     if (!pixelData) {
       GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_ENUM in glReadPixels: Unrecognized combination of type=' + type + ' and format=' + format + '!');
+      err('GL_INVALID_ENUM in glReadPixels: Unrecognized combination of type=' + type + ' and format=' + format + '!');
 #endif
       return;
     }
@@ -1426,7 +1633,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetTexParameterfv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetTexParameterfv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1440,7 +1647,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetTexParameteriv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetTexParameteriv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1474,7 +1681,7 @@ var LibraryGL = {
       if (!buffer) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenBuffers: GLctx.createBuffer returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenBuffers: GLctx.createBuffer returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('buffers', 'i++*4', 0, 'i32') }}};
         return;
@@ -1511,7 +1718,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if data is a null pointer. Since calling this function does not make sense
       // if data == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetBufferParameteriv(target=' + target + ', value=' + value + ', data=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetBufferParameteriv(target=' + target + ', value=' + value + ', data=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1526,7 +1733,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if data is a null pointer. Since calling this function does not make sense
       // if data == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetBufferParameteri64v(target=' + target + ', value=' + value + ', data=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetBufferParameteri64v(target=' + target + ', value=' + value + ', data=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1585,7 +1792,7 @@ var LibraryGL = {
       if (!query) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenQueriesEXT: GLctx.disjointTimerQueryExt.createQueryEXT returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenQueriesEXT: GLctx.disjointTimerQueryExt.createQueryEXT returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('ids', 'i++*4', 0, 'i32') }}};
         return;
@@ -1642,7 +1849,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetQueryivEXT(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetQueryivEXT(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1656,7 +1863,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetQueryObject(u)ivEXT(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetQueryObject(u)ivEXT(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1682,7 +1889,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetQueryObject(u)i64vEXT(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetQueryObject(u)i64vEXT(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1741,13 +1948,13 @@ var LibraryGL = {
   glMapBufferRange__deps: ['$emscriptenWebGLGetBufferBinding', '$emscriptenWebGLValidateMapBufferTarget'],
   glMapBufferRange: function(target, offset, length, access) {
     if (access != 0x1A && access != 0xA) {
-      Module.printErr("glMapBufferRange is only supported when access is MAP_WRITE|INVALIDATE_BUFFER");
+      err("glMapBufferRange is only supported when access is MAP_WRITE|INVALIDATE_BUFFER");
       return 0;
     }
 
     if (!emscriptenWebGLValidateMapBufferTarget(target)) {
       GL.recordError(0x0500/*GL_INVALID_ENUM*/);
-      Module.printErr('GL_INVALID_ENUM in glMapBufferRange');
+      err('GL_INVALID_ENUM in glMapBufferRange');
       return 0;
     }
 
@@ -1775,7 +1982,7 @@ var LibraryGL = {
       {{{ makeSetValue('params', '0', 'ptr', 'i32') }}};
     } else {
       GL.recordError(0x0500/*GL_INVALID_ENUM*/);
-      Module.printErr('GL_INVALID_ENUM in glGetBufferPointerv');
+      err('GL_INVALID_ENUM in glGetBufferPointerv');
     }
   },
 
@@ -1784,7 +1991,7 @@ var LibraryGL = {
   glFlushMappedBufferRange: function(target, offset, length) {
     if (!emscriptenWebGLValidateMapBufferTarget(target)) {
       GL.recordError(0x0500/*GL_INVALID_ENUM*/);
-      Module.printErr('GL_INVALID_ENUM in glFlushMappedBufferRange');
+      err('GL_INVALID_ENUM in glFlushMappedBufferRange');
       return;
     }
 
@@ -1817,7 +2024,7 @@ var LibraryGL = {
   glUnmapBuffer: function(target) {
     if (!emscriptenWebGLValidateMapBufferTarget(target)) {
       GL.recordError(0x0500/*GL_INVALID_ENUM*/);
-      Module.printErr('GL_INVALID_ENUM in glUnmapBuffer');
+      err('GL_INVALID_ENUM in glUnmapBuffer');
       return 0;
     }
 
@@ -1900,7 +2107,7 @@ var LibraryGL = {
       if (!query) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenQueries: GLctx.createQuery returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenQueries: GLctx.createQuery returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('ids', 'i++*4', 0, 'i32') }}};
         return;
@@ -1944,7 +2151,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetQueryiv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetQueryiv(target=' + target +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1958,7 +2165,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetQueryObjectuiv(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetQueryObjectuiv(id=' + id +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -1985,7 +2192,7 @@ var LibraryGL = {
       if (!sampler) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenSamplers: GLctx.createSampler returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenSamplers: GLctx.createSampler returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('samplers', 'i++*4', 0, 'i32') }}};
         return;
@@ -2064,7 +2271,7 @@ var LibraryGL = {
       // GLES3 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetSamplerParameterfv(sampler=' + sampler +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetSamplerParameterfv(sampler=' + sampler +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2079,7 +2286,7 @@ var LibraryGL = {
       // GLES3 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetSamplerParameteriv(sampler=' + sampler +', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetSamplerParameteriv(sampler=' + sampler +', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2096,7 +2303,7 @@ var LibraryGL = {
       if (!transformFeedback) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenTransformFeedbacks: GLctx.createTransformFeedback returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenTransformFeedbacks: GLctx.createTransformFeedback returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('ids', 'i++*4', 0, 'i32') }}};
         return;
@@ -2178,7 +2385,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if data is a null pointer. Since calling this function does not make sense
       // if data == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetInteger(64)i_v(target=' + target + ', index=' + index + ', data=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetInteger(64)i_v(target=' + target + ', index=' + index + ', data=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2202,7 +2409,7 @@ var LibraryGL = {
             default: {
               GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-              Module.printErr('GL_INVALID_ENUM in glGetInteger(64)i_v(' + target + ') and it returns null!');
+              err('GL_INVALID_ENUM in glGetInteger(64)i_v(' + target + ') and it returns null!');
 #endif
               return;
             }
@@ -2212,7 +2419,7 @@ var LibraryGL = {
         } else {
           GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-          Module.printErr('GL_INVALID_ENUM in glGetInteger(64)i_v: Unknown object returned from WebGL getIndexedParameter(' + target + ')!');
+          err('GL_INVALID_ENUM in glGetInteger(64)i_v: Unknown object returned from WebGL getIndexedParameter(' + target + ')!');
 #endif
           return;
         }
@@ -2220,7 +2427,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500); // GL_INVALID_ENUM
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glGetInteger(64)i_v: Native code calling glGetInteger(64)i_v(' + target + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+        err('GL_INVALID_ENUM in glGetInteger(64)i_v: Native code calling glGetInteger(64)i_v(' + target + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
 #endif
         return;
     }
@@ -2240,13 +2447,11 @@ var LibraryGL = {
     emscriptenWebGLGetIndexed(target, index, data, 'Integer');
   },
 
-#if USE_WEBGL2
   glGetInteger64i_v__sig: 'viii',
   glGetInteger64i_v__deps: ['$emscriptenWebGLGetIndexed'],
   glGetInteger64i_v: function(target, index, data) {
     emscriptenWebGLGetIndexed(target, index, data, 'Integer64');
   },
-#endif
 
   // Uniform Buffer objects
   glBindBufferBase__sig: 'viii',
@@ -2276,7 +2481,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if uniformIndices is a null pointer. Since calling this function does not make sense
       // if uniformIndices == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetUniformIndices(program=' + program + ', uniformCount=' + uniformCount + ', uniformNames=' + uniformNames + ', uniformIndices=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetUniformIndices(program=' + program + ', uniformCount=' + uniformCount + ', uniformNames=' + uniformNames + ', uniformIndices=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2308,7 +2513,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if params == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetActiveUniformsiv(program=' + program + ', uniformCount=' + uniformCount + ', uniformIndices=' + uniformIndices + ', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetActiveUniformsiv(program=' + program + ', uniformCount=' + uniformCount + ', uniformIndices=' + uniformIndices + ', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2348,7 +2553,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if params == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetActiveUniformBlockiv(program=' + program + ', uniformBlockIndex=' + uniformBlockIndex + ', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetActiveUniformBlockiv(program=' + program + ', uniformBlockIndex=' + uniformBlockIndex + ', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2464,7 +2669,7 @@ var LibraryGL = {
     // See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.15
     timeoutLo = timeoutLo >>> 0;
     timeoutHi = timeoutHi >>> 0;
-    var timeout = (timeoutLo == 0xFFFFFFFF && timeoutHi == 0xFFFFFFFF) ? -1 : Runtime.makeBigInt(timeoutLo, timeoutHi, true);
+    var timeout = (timeoutLo == 0xFFFFFFFF && timeoutHi == 0xFFFFFFFF) ? -1 : makeBigInt(timeoutLo, timeoutHi, true);
     return GLctx.clientWaitSync(GL.syncs[sync], flags, timeout);
   },
 
@@ -2473,7 +2678,7 @@ var LibraryGL = {
     // See WebGL2 vs GLES3 difference on GL_TIMEOUT_IGNORED above (https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.15)
     timeoutLo = timeoutLo >>> 0;
     timeoutHi = timeoutHi >>> 0;
-    var timeout = (timeoutLo == 0xFFFFFFFF && timeoutHi == 0xFFFFFFFF) ? -1 : Runtime.makeBigInt(timeoutLo, timeoutHi, true);
+    var timeout = (timeoutLo == 0xFFFFFFFF && timeoutHi == 0xFFFFFFFF) ? -1 : makeBigInt(timeoutLo, timeoutHi, true);
     GLctx.waitSync(GL.syncs[sync], flags, timeout);
   },
 
@@ -2483,7 +2688,7 @@ var LibraryGL = {
       // GLES3 specification does not specify how to behave if bufSize < 0, however in the spec wording for glGetInternalFormativ, it does say that GL_INVALID_VALUE should be raised,
       // so raise GL_INVALID_VALUE here as well.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetSynciv(sync=' + sync + ', pname=' + pname + ', bufSize=' + bufSize + ', length=' + length + ', values='+values+'): Function called with bufSize < 0!');
+      err('GL_INVALID_VALUE in glGetSynciv(sync=' + sync + ', pname=' + pname + ', bufSize=' + bufSize + ', length=' + length + ', values='+values+'): Function called with bufSize < 0!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2492,7 +2697,7 @@ var LibraryGL = {
       // GLES3 specification does not specify how to behave if values is a null pointer. Since calling this function does not make sense
       // if values == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetSynciv(sync=' + sync + ', pname=' + pname + ', bufSize=' + bufSize + ', length=' + length + ', values=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetSynciv(sync=' + sync + ', pname=' + pname + ', bufSize=' + bufSize + ', length=' + length + ', values=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2513,7 +2718,7 @@ var LibraryGL = {
   glGetInternalFormativ: function(target, internalformat, pname, bufSize, params) {
     if (bufSize < 0) {
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetInternalFormativ(target=' + target + ', internalformat=' + internalformat + ', pname=' + pname + ', bufSize=' + bufSize + ', params=' + params + '): Function called with bufSize < 0!');
+      err('GL_INVALID_VALUE in glGetInternalFormativ(target=' + target + ', internalformat=' + internalformat + ', pname=' + pname + ', bufSize=' + bufSize + ', params=' + params + '): Function called with bufSize < 0!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2522,7 +2727,7 @@ var LibraryGL = {
       // GLES3 specification does not specify how to behave if values is a null pointer. Since calling this function does not make sense
       // if values == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetInternalFormativ(target=' + target + ', internalformat=' + internalformat + ', pname=' + pname + ', bufSize=' + bufSize + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetInternalFormativ(target=' + target + ', internalformat=' + internalformat + ', pname=' + pname + ', bufSize=' + bufSize + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2551,7 +2756,7 @@ var LibraryGL = {
       if (!renderbuffer) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenRenderbuffers: GLctx.createRenderbuffer returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenRenderbuffers: GLctx.createRenderbuffer returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('renderbuffers', 'i++*4', 0, 'i32') }}};
         return;
@@ -2589,7 +2794,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if params == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetRenderbufferParameteriv(target=' + target + ', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetRenderbufferParameteriv(target=' + target + ', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2609,7 +2814,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if params == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetUniform*v(program=' + program + ', location=' + location + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetUniform*v(program=' + program + ', location=' + location + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -2703,14 +2908,14 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if params is a null pointer. Since calling this function does not make sense
       // if params == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetVertexAttrib*v(index=' + index + ', pname=' + pname + ', params=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetVertexAttrib*v(index=' + index + ', pname=' + pname + ', params=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
     }
 #if FULL_ES2
     if (GL.currentContext.clientBuffers[index].enabled) {
-      Module.printErr("glGetVertexAttrib*v on client-side array: not supported, bad data returned");
+      err("glGetVertexAttrib*v on client-side array: not supported, bad data returned");
     }
 #endif
     var data = GLctx.getVertexAttrib(index, pname);
@@ -2773,14 +2978,14 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if pointer is a null pointer. Since calling this function does not make sense
       // if pointer == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetVertexAttribPointerv(index=' + index + ', pname=' + pname + ', pointer=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetVertexAttribPointerv(index=' + index + ', pname=' + pname + ', pointer=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
     }
 #if FULL_ES2
     if (GL.currentContext.clientBuffers[index].enabled) {
-      Module.printErr("glGetVertexAttribPointer on client-side array: not supported, bad data returned");
+      err("glGetVertexAttribPointer on client-side array: not supported, bad data returned");
     }
 #endif
     {{{ makeSetValue('pointer', '0', 'GLctx.getVertexAttribOffset(index, pname)', 'i32') }}};
@@ -3585,7 +3790,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if p is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetShaderiv(shader=' + shader + ', pname=' + pname + ', p=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetShaderiv(shader=' + shader + ', pname=' + pname + ', p=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -3612,7 +3817,7 @@ var LibraryGL = {
       // GLES2 specification does not specify how to behave if p is a null pointer. Since calling this function does not make sense
       // if p == null, issue a GL error to notify user about it.
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0): Function called with null out pointer!');
+      err('GL_INVALID_VALUE in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0): Function called with null out pointer!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -3623,7 +3828,7 @@ var LibraryGL = {
 
     if (program >= GL.counter) {
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_VALUE in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0x' + p.toString(16) + '): The specified program object name was not generated by GL!');
+      err('GL_INVALID_VALUE in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0x' + p.toString(16) + '): The specified program object name was not generated by GL!');
 #endif
       GL.recordError(0x0501 /* GL_INVALID_VALUE */);
       return;
@@ -3632,7 +3837,7 @@ var LibraryGL = {
     var ptable = GL.programInfos[program];
     if (!ptable) {
 #if GL_ASSERTIONS
-      Module.printErr('GL_INVALID_OPERATION in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0x' + p.toString(16) + '): The specified GL object name does not refer to a program object!');
+      err('GL_INVALID_OPERATION in glGetProgramiv(program=' + program + ', pname=' + pname + ', p=0x' + p.toString(16) + '): The specified GL object name does not refer to a program object!');
 #endif
       GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
       return;
@@ -3786,7 +3991,7 @@ var LibraryGL = {
   glProgramParameteri: function(program, pname, value) {
     GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-    Module.printErr("GL_INVALID_ENUM in glProgramParameteri: WebGL does not support binary shader formats! Calls to glProgramParameteri always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
+    err("GL_INVALID_ENUM in glProgramParameteri: WebGL does not support binary shader formats! Calls to glProgramParameteri always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
 #endif
   },
 
@@ -3794,7 +3999,7 @@ var LibraryGL = {
   glGetProgramBinary: function(program, bufSize, length, binaryFormat, binary) {
     GL.recordError(0x0502/*GL_INVALID_OPERATION*/);
 #if GL_ASSERTIONS
-    Module.printErr("GL_INVALID_OPERATION in glGetProgramBinary: WebGL does not support binary shader formats! Calls to glGetProgramBinary always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
+    err("GL_INVALID_OPERATION in glGetProgramBinary: WebGL does not support binary shader formats! Calls to glGetProgramBinary always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
 #endif
   },
 
@@ -3802,7 +4007,7 @@ var LibraryGL = {
   glProgramBinary: function(program, binaryFormat, binary, length) {
     GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-    Module.printErr("GL_INVALID_ENUM in glProgramBinary: WebGL does not support binary shader formats! Calls to glProgramBinary always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
+    err("GL_INVALID_ENUM in glProgramBinary: WebGL does not support binary shader formats! Calls to glProgramBinary always fail. See https://www.khronos.org/registry/webgl/specs/latest/2.0/#5.4");
 #endif
   },
 #endif
@@ -3821,7 +4026,16 @@ var LibraryGL = {
 #if GL_ASSERTIONS
     GL.validateGLObjectID(GL.framebuffers, framebuffer, 'glBindFramebuffer', 'framebuffer');
 #endif
+
+#if OFFSCREEN_FRAMEBUFFER
+    // defaultFbo may not be present if 'renderViaOffscreenBackBuffer' was not enabled during context creation time,
+    // i.e. setting -s OFFSCREEN_FRAMEBUFFER=1 at compilation time does not yet mandate that offscreen back buffer
+    // is being used, but that is ultimately decided at context creation time.
+    GLctx.bindFramebuffer(target, framebuffer ? GL.framebuffers[framebuffer] : GLctx.canvas.GLctxObject.defaultFbo);
+#else
     GLctx.bindFramebuffer(target, framebuffer ? GL.framebuffers[framebuffer] : null);
+#endif
+
   },
 
   glGenFramebuffers__sig: 'vii',
@@ -3831,7 +4045,7 @@ var LibraryGL = {
       if (!framebuffer) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenFramebuffers: GLctx.createFramebuffer returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenFramebuffers: GLctx.createFramebuffer returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('ids', 'i++*4', 0, 'i32') }}};
         return;
@@ -3886,6 +4100,10 @@ var LibraryGL = {
   glGetFramebufferAttachmentParameteriv__sig: 'viiii',
   glGetFramebufferAttachmentParameteriv: function(target, attachment, pname, params) {
     var result = GLctx.getFramebufferAttachmentParameter(target, attachment, pname);
+    if (result instanceof WebGLRenderbuffer ||
+        result instanceof WebGLTexture) {
+      result = result.name | 0;
+    }
     {{{ makeSetValue('params', '0', 'result', 'i32') }}};
   },
 
@@ -3913,7 +4131,7 @@ var LibraryGL = {
       if (!vao) {
         GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_OPERATION in glGenVertexArrays: GLctx.vao.createVertexArrayOES returned null - most likely GL context is lost!');
+        err('GL_INVALID_OPERATION in glGenVertexArrays: GLctx.vao.createVertexArrayOES returned null - most likely GL context is lost!');
 #endif
         while(i < n) {{{ makeSetValue('arrays', 'i++*4', 0, 'i32') }}};
         return;
@@ -4021,9 +4239,9 @@ var LibraryGL = {
       GLEmulation.fogColor = new Float32Array(4);
 
       // Add some emulation workarounds
-      Module.printErr('WARNING: using emscripten GL emulation. This is a collection of limited workarounds, do not expect it to work.');
+      err('WARNING: using emscripten GL emulation. This is a collection of limited workarounds, do not expect it to work.');
 #if GL_UNSAFE_OPTS == 1
-      Module.printErr('WARNING: using emscripten GL emulation unsafe opts. If weirdness happens, try -s GL_UNSAFE_OPTS=0');
+      err('WARNING: using emscripten GL emulation unsafe opts. If weirdness happens, try -s GL_UNSAFE_OPTS=0');
 #endif
 
       // XXX some of the capabilities we don't support may lead to incorrect rendering, if we do not emulate them in shaders
@@ -4357,10 +4575,10 @@ var LibraryGL = {
         GLctx.compileShader(GL.shaders[shader]);
 #if GL_DEBUG
         if (!GLctx.getShaderParameter(GL.shaders[shader], GLctx.COMPILE_STATUS)) {
-          Module.printErr('Failed to compile shader: ' + GLctx.getShaderInfoLog(GL.shaders[shader]));
-          Module.printErr('Info: ' + JSON.stringify(GL.shaderInfos[shader]));
-          Module.printErr('Original source: ' + GL.shaderOriginalSources[shader]);
-          Module.printErr('Source: ' + GL.shaderSources[shader]);
+          err('Failed to compile shader: ' + GLctx.getShaderInfoLog(GL.shaders[shader]));
+          err('Info: ' + JSON.stringify(GL.shaderInfos[shader]));
+          err('Original source: ' + GL.shaderOriginalSources[shader]);
+          err('Source: ' + GL.shaderSources[shader]);
           throw 'Shader compilation halt';
         }
 #endif
@@ -4380,7 +4598,7 @@ var LibraryGL = {
       _glDetachShader = _emscripten_glDetachShader = function _glDetachShader(program, shader) {
         var programShader = GL.programShaders[program];
         if (!programShader) {
-          Module.printErr('WARNING: _glDetachShader received invalid program: ' + program);
+          err('WARNING: _glDetachShader received invalid program: ' + program);
           return;
         }
         var index = programShader.indexOf(shader);
@@ -4393,11 +4611,11 @@ var LibraryGL = {
       _glUseProgram = _emscripten_glUseProgram = function _glUseProgram(program) {
 #if GL_DEBUG
         if (GL.debug) {
-          Module.printErr('[using program with shaders]');
+          err('[using program with shaders]');
           if (program) {
             GL.programShaders[program].forEach(function(shader) {
-              Module.printErr('  shader ' + shader + ', original source: ' + GL.shaderOriginalSources[shader]);
-              Module.printErr('         Source: ' + GL.shaderSources[shader]);
+              err('  shader ' + shader + ', original source: ' + GL.shaderOriginalSources[shader]);
+              err('         Source: ' + GL.shaderSources[shader]);
             });
           }
         }
@@ -4546,7 +4764,7 @@ var LibraryGL = {
     } else if (GL.shaders[id]) {
       _glDeleteShader(id);
     } else {
-      Module.printErr('WARNING: deleteObject received invalid id: ' + id);
+      err('WARNING: deleteObject received invalid id: ' + id);
     }
   },
   glDeleteObjectARB: 'glDeleteObject',
@@ -4576,7 +4794,7 @@ var LibraryGL = {
       }
       _glGetShaderiv(id, type, result);
     } else {
-      Module.printErr('WARNING: getObjectParameteriv received invalid id: ' + id);
+      err('WARNING: getObjectParameteriv received invalid id: ' + id);
     }
   },
   glGetObjectParameterivARB: 'glGetObjectParameteriv',
@@ -4589,7 +4807,7 @@ var LibraryGL = {
     } else if (GL.shaders[id]) {
       _glGetShaderInfoLog(id, maxLength, length, infoLog);
     } else {
-      Module.printErr('WARNING: glGetInfoLog received invalid id: ' + id);
+      err('WARNING: glGetInfoLog received invalid id: ' + id);
     }
   },
   glGetInfoLogARB: 'glGetInfoLog',
@@ -4614,7 +4832,7 @@ var LibraryGL = {
       default:
         GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-        Module.printErr('GL_INVALID_ENUM in glGetPointerv: Unsupported name ' + name + '!');
+        err('GL_INVALID_ENUM in glGetPointerv: Unsupported name ' + name + '!');
 #endif
         return;
     }
@@ -5518,7 +5736,7 @@ var LibraryGL = {
               break;
 
             default:
-              Module.printErr('WARNING: Unhandled `pname` in call to `glTexEnvf`.');
+              err('WARNING: Unhandled `pname` in call to `glTexEnvf`.');
           }
         },
 
@@ -5638,7 +5856,7 @@ var LibraryGL = {
               break;
 
             default:
-              Module.printErr('WARNING: Unhandled `pname` in call to `glTexEnvi`.');
+              err('WARNING: Unhandled `pname` in call to `glTexEnvi`.');
           }
         },
 
@@ -5658,7 +5876,7 @@ var LibraryGL = {
               break
             }
             default:
-              Module.printErr('WARNING: Unhandled `pname` in call to `glTexEnvfv`.');
+              err('WARNING: Unhandled `pname` in call to `glTexEnvfv`.');
           }
         },
 
@@ -5744,7 +5962,7 @@ var LibraryGL = {
               return;
 
             default:
-              Module.printErr('WARNING: Unhandled `pname` in call to `glGetTexEnvi`.');
+              err('WARNING: Unhandled `pname` in call to `glGetTexEnvi`.');
           }
         },
 
@@ -5911,7 +6129,7 @@ var LibraryGL = {
       var renderer = keyView.get();
       if (!renderer) {
 #if GL_DEBUG
-        Module.printErr('generating renderer for ' + JSON.stringify(attributes));
+        err('generating renderer for ' + JSON.stringify(attributes));
 #endif
         renderer = GLImmediate.createRenderer();
         GLImmediate.currentRenderer = renderer;
@@ -5933,7 +6151,7 @@ var LibraryGL = {
 #if ASSERTIONS
         if (!useCurrProgram) {
           if (GLImmediate.TexEnvJIT.getTexUnitType(i) == 0) {
-             Runtime.warnOnce("GL_TEXTURE" + i + " coords are supplied, but that texture unit is disabled in the fixed-function pipeline.");
+             warnOnce("GL_TEXTURE" + i + " coords are supplied, but that texture unit is disabled in the fixed-function pipeline.");
           }
         }
 #endif
@@ -6482,7 +6700,7 @@ var LibraryGL = {
     // Main functions
     initted: false,
     init: function() {
-      Module.printErr('WARNING: using emscripten GL immediate mode emulation. This is very limited in what it supports');
+      err('WARNING: using emscripten GL immediate mode emulation. This is very limited in what it supports');
       GLImmediate.initted = true;
 
       if (!Module.useWebGL) return; // a 2D canvas may be currently used TODO: make sure we are actually called in that case
@@ -6539,7 +6757,7 @@ var LibraryGL = {
       if (!GLImmediate.modifiedClientAttributes) {
 #if GL_ASSERTIONS
         if ((GLImmediate.stride & 3) != 0) {
-          Runtime.warnOnce('Warning: Rendering from client side vertex arrays where stride (' + GLImmediate.stride + ') is not a multiple of four! This is not currently supported!');
+          warnOnce('Warning: Rendering from client side vertex arrays where stride (' + GLImmediate.stride + ') is not a multiple of four! This is not currently supported!');
         }
 #endif
         GLImmediate.vertexCounter = (GLImmediate.stride * count) / 4; // XXX assuming float
@@ -6585,7 +6803,7 @@ var LibraryGL = {
         // The immediate-mode glBegin()/glEnd() vertex submission gets automatically generated in appropriate layout,
         // so never need to come down this path if that was used.
 #if GL_ASSERTIONS
-        Runtime.warnOnce('Rendering from planar client-side vertex arrays. This is a very slow emulation path! Use interleaved vertex arrays for best performance.');
+        warnOnce('Rendering from planar client-side vertex arrays. This is a very slow emulation path! Use interleaved vertex arrays for best performance.');
 #endif
         if (!GLImmediate.restrideBuffer) GLImmediate.restrideBuffer = _malloc(GL.MAX_TEMP_BUFFER_SIZE);
         var start = GLImmediate.restrideBuffer;
@@ -6637,7 +6855,7 @@ var LibraryGL = {
       if (!beginEnd) {
 #if GL_ASSERTIONS
         if ((GLImmediate.stride & 3) != 0) {
-          Runtime.warnOnce('Warning: Rendering from client side vertex arrays where stride (' + GLImmediate.stride + ') is not a multiple of four! This is not currently supported!');
+          warnOnce('Warning: Rendering from client side vertex arrays where stride (' + GLImmediate.stride + ') is not a multiple of four! This is not currently supported!');
         }
 #endif
         GLImmediate.vertexCounter = (GLImmediate.stride * count) / 4; // XXX assuming float
@@ -6974,7 +7192,7 @@ var LibraryGL = {
     var attrib = GLEmulation.getAttributeFromCapability(cap);
     if (attrib === null) {
 #if ASSERTIONS
-      Module.printErr('WARNING: unhandled clientstate: ' + cap);
+      err('WARNING: unhandled clientstate: ' + cap);
 #endif
       return;
     }
@@ -6994,7 +7212,7 @@ var LibraryGL = {
     var attrib = GLEmulation.getAttributeFromCapability(cap);
     if (attrib === null) {
 #if ASSERTIONS
-      Module.printErr('WARNING: unhandled clientstate: ' + cap);
+      err('WARNING: unhandled clientstate: ' + cap);
 #endif
       return;
     }
@@ -7163,7 +7381,7 @@ var LibraryGL = {
 
   glLoadMatrixf: function(matrix) {
 #if GL_DEBUG
-    if (GL.debug) Module.printErr('glLoadMatrixf receiving: ' + Array.prototype.slice.call(HEAPF32.subarray(matrix >> 2, (matrix >> 2) + 16)));
+    if (GL.debug) err('glLoadMatrixf receiving: ' + Array.prototype.slice.call(HEAPF32.subarray(matrix >> 2, (matrix >> 2) + 16)));
 #endif
     GLImmediate.matricesModified = true;
     GLImmediate.matrixVersion[GLImmediate.currentMatrix] = (GLImmediate.matrixVersion[GLImmediate.currentMatrix] + 1)|0;
@@ -7264,9 +7482,9 @@ var LibraryGL = {
 
   glTexGeni: function() { throw 'glTexGeni: TODO' },
   glTexGenfv: function() { throw 'glTexGenfv: TODO' },
-  glTexEnvi: function() { Runtime.warnOnce('glTexEnvi: TODO') },
-  glTexEnvf: function() { Runtime.warnOnce('glTexEnvf: TODO') },
-  glTexEnvfv: function() { Runtime.warnOnce('glTexEnvfv: TODO') },
+  glTexEnvi: function() { warnOnce('glTexEnvi: TODO') },
+  glTexEnvf: function() { warnOnce('glTexEnvf: TODO') },
+  glTexEnvfv: function() { warnOnce('glTexEnvfv: TODO') },
 
   glGetTexEnviv: function(target, pname, param) { throw 'GL emulation not initialized!'; },
   glGetTexEnvfv: function(target, pname, param) { throw 'GL emulation not initialized!'; },
@@ -7275,7 +7493,7 @@ var LibraryGL = {
   glTexCoord3f: function() { throw 'glTexCoord3f: TODO' },
   glGetTexLevelParameteriv: function() { throw 'glGetTexLevelParameteriv: TODO' },
 
-  glShadeModel: function() { Runtime.warnOnce('TODO: glShadeModel') },
+  glShadeModel: function() { warnOnce('TODO: glShadeModel') },
 
   // Open GLES1.1 compatibility
 
@@ -7391,6 +7609,9 @@ var LibraryGL = {
       cb.stride = stride;
       cb.ptr = ptr;
       cb.clientside = true;
+      cb.vertexAttribPointerAdaptor = function(index, size, type, normalized, stride, ptr) {
+        this.vertexAttribPointer(index, size, type, normalized, stride, ptr);
+      };
       return;
     }
     cb.clientside = false;
@@ -7416,6 +7637,9 @@ var LibraryGL = {
       cb.stride = stride;
       cb.ptr = ptr;
       cb.clientside = true;
+      cb.vertexAttribPointerAdaptor = function(index, size, type, normalized, stride, ptr) {
+        this.vertexAttribIPointer(index, size, type, stride, ptr);
+      };
       return;
     }
     cb.clientside = false;
@@ -7503,7 +7727,6 @@ var LibraryGL = {
     // TODO: This should be a trivial pass-though function, but due to https://bugzilla.mozilla.org/show_bug.cgi?id=1202427,
     // we work around by ignoring the range.
     _glDrawElements(mode, count, type, indices);
-    GLctx.drawElements(mode, count, type, indices);
   },
 #endif
 
@@ -7511,7 +7734,7 @@ var LibraryGL = {
   glShaderBinary: function() {
     GL.recordError(0x0500/*GL_INVALID_ENUM*/);
 #if GL_ASSERTIONS
-    Module.printErr("GL_INVALID_ENUM in glShaderBinary: WebGL does not support binary shader formats! Calls to glShaderBinary always fail.");
+    err("GL_INVALID_ENUM in glShaderBinary: WebGL does not support binary shader formats! Calls to glShaderBinary always fail.");
 #endif
   },
 

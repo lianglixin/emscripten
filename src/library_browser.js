@@ -3,7 +3,7 @@
 // Utilities for browser environments
 var LibraryBrowser = {
   $Browser__deps: ['emscripten_set_main_loop', 'emscripten_set_main_loop_timing'],
-  $Browser__postset: 'Module["requestFullScreen"] = function Module_requestFullScreen(lockPointer, resizeCanvas, vrDevice) { Module.printErr("Module.requestFullScreen is deprecated. Please call Module.requestFullscreen instead."); Module["requestFullScreen"] = Module["requestFullscreen"]; Browser.requestFullScreen(lockPointer, resizeCanvas, vrDevice) };\n' + // exports
+  $Browser__postset: 'Module["requestFullScreen"] = function Module_requestFullScreen(lockPointer, resizeCanvas, vrDevice) { err("Module.requestFullScreen is deprecated. Please call Module.requestFullscreen instead."); Module["requestFullScreen"] = Module["requestFullscreen"]; Browser.requestFullScreen(lockPointer, resizeCanvas, vrDevice) };\n' + // exports
                      'Module["requestFullscreen"] = function Module_requestFullscreen(lockPointer, resizeCanvas, vrDevice) { Browser.requestFullscreen(lockPointer, resizeCanvas, vrDevice) };\n' + // exports
                      'Module["requestAnimationFrame"] = function Module_requestAnimationFrame(func) { Browser.requestAnimationFrame(func) };\n' +
                      'Module["setCanvasSize"] = function Module_setCanvasSize(width, height, noUpdates) { Browser.setCanvasSize(width, height, noUpdates) };\n' +
@@ -68,7 +68,7 @@ var LibraryBrowser = {
           if (e instanceof ExitStatus) {
             return;
           } else {
-            if (e && typeof e === 'object' && e.stack) Module.printErr('exception thrown: ' + [e, e.stack]);
+            if (e && typeof e === 'object' && e.stack) err('exception thrown: ' + [e, e.stack]);
             throw e;
           }
         }
@@ -122,7 +122,7 @@ var LibraryBrowser = {
               b = new Blob([(new Uint8Array(byteArray)).buffer], { type: Browser.getMimetype(name) });
             }
           } catch(e) {
-            Runtime.warnOnce('Blob constructor present but fails: ' + e + '; falling back to blob builder');
+            warnOnce('Blob constructor present but fails: ' + e + '; falling back to blob builder');
           }
         }
         if (!b) {
@@ -225,6 +225,35 @@ var LibraryBrowser = {
       };
       Module['preloadPlugins'].push(audioPlugin);
 
+#if WASM
+#if MAIN_MODULE
+      var wasmPlugin = {};
+      wasmPlugin['asyncWasmLoadPromise'] = new Promise(
+        function(resolve, reject) { return resolve(); });
+      wasmPlugin['canHandle'] = function(name) {
+        return !Module.noWasmDecoding && name.endsWith('.so');
+      };
+      wasmPlugin['handle'] = function(byteArray, name, onload, onerror) {
+        // loadWebAssemblyModule can not load modules out-of-order, so rather
+        // than just running the promises in parallel, this makes a chain of
+        // promises to run in series.
+        this['asyncWasmLoadPromise'] = this['asyncWasmLoadPromise'].then(
+          function() {
+            return loadWebAssemblyModule(byteArray, true);
+          }).then(
+            function(module) {
+              Module['preloadedWasm'][name] = module;
+              onload();
+            },
+            function(err) {
+              console.warn("Couldn't instantiate wasm: " + name + " '" + err + "'");
+              onerror();
+            });
+      };
+      Module['preloadPlugins'].push(wasmPlugin);
+#endif // MAIN_MODULE
+#endif // WASM
+
       // Canvas event setup
 
       function pointerLockChange() {
@@ -237,7 +266,7 @@ var LibraryBrowser = {
       if (canvas) {
         // forced aspect ratio can be enabled by defining 'forcedAspectRatio' on Module
         // Module['forcedAspectRatio'] = 4 / 3;
-        
+
         canvas.requestPointerLock = canvas['requestPointerLock'] ||
                                     canvas['mozRequestPointerLock'] ||
                                     canvas['webkitRequestPointerLock'] ||
@@ -335,18 +364,24 @@ var LibraryBrowser = {
           canvas.exitFullscreen = canvas.exitFullscreen.bind(document);
           if (Browser.lockPointer) canvas.requestPointerLock();
           Browser.isFullscreen = true;
-          if (Browser.resizeCanvas) Browser.setFullscreenCanvasSize();
+          if (Browser.resizeCanvas) {
+            Browser.setFullscreenCanvasSize();
+          } else {
+            Browser.updateCanvasDimensions(canvas);
+          }
         } else {
-          
           // remove the full screen specific parent of the canvas again to restore the HTML structure from before going full screen
           canvasContainer.parentNode.insertBefore(canvas, canvasContainer);
           canvasContainer.parentNode.removeChild(canvasContainer);
-          
-          if (Browser.resizeCanvas) Browser.setWindowedCanvasSize();
+
+          if (Browser.resizeCanvas) {
+            Browser.setWindowedCanvasSize();
+          } else {
+            Browser.updateCanvasDimensions(canvas);
+          }
         }
         if (Module['onFullScreen']) Module['onFullScreen'](Browser.isFullscreen);
         if (Module['onFullscreen']) Module['onFullscreen'](Browser.isFullscreen);
-        Browser.updateCanvasDimensions(canvas);
       }
 
       if (!Browser.fullscreenHandlersInstalled) {
@@ -377,7 +412,7 @@ var LibraryBrowser = {
     },
 
     requestFullScreen: function(lockPointer, resizeCanvas, vrDevice) {
-        Module.printErr('Browser.requestFullScreen() is deprecated. Please call Browser.requestFullscreen instead.');
+        err('Browser.requestFullScreen() is deprecated. Please call Browser.requestFullscreen instead.');
         Browser.requestFullScreen = function(lockPointer, resizeCanvas, vrDevice) {
           return Browser.requestFullscreen(lockPointer, resizeCanvas, vrDevice);
         }
@@ -484,7 +519,7 @@ var LibraryBrowser = {
         'mp3': 'audio/mpeg'
       }[name.substr(name.lastIndexOf('.')+1)];
     },
-    
+
     getUserMedia: function(func) {
       if(!window.getUserMedia) {
         window.getUserMedia = navigator['getUserMedia'] ||
@@ -518,13 +553,13 @@ var LibraryBrowser = {
     getMouseWheelDelta: function(event) {
       var delta = 0;
       switch (event.type) {
-        case 'DOMMouseScroll': 
+        case 'DOMMouseScroll':
           delta = event.detail;
           break;
-        case 'mousewheel': 
+        case 'mousewheel':
           delta = event.wheelDelta;
           break;
-        case 'wheel': 
+        case 'wheel':
           delta = event['deltaY'];
           break;
         default:
@@ -552,17 +587,17 @@ var LibraryBrowser = {
           Browser.mouseMovementX = Browser.getMovementX(event);
           Browser.mouseMovementY = Browser.getMovementY(event);
         }
-        
+
         // check if SDL is available
         if (typeof SDL != "undefined") {
-        	Browser.mouseX = SDL.mouseX + Browser.mouseMovementX;
-        	Browser.mouseY = SDL.mouseY + Browser.mouseMovementY;
+          Browser.mouseX = SDL.mouseX + Browser.mouseMovementX;
+          Browser.mouseY = SDL.mouseY + Browser.mouseMovementY;
         } else {
-        	// just add the mouse delta to the current absolut mouse position
-        	// FIXME: ideally this should be clamped against the canvas size and zero
-        	Browser.mouseX += Browser.mouseMovementX;
-        	Browser.mouseY += Browser.mouseMovementY;
-        }        
+          // just add the mouse delta to the current absolut mouse position
+          // FIXME: ideally this should be clamped against the canvas size and zero
+          Browser.mouseX += Browser.mouseMovementX;
+          Browser.mouseY += Browser.mouseMovementY;
+        }
       } else {
         // Otherwise, calculate the movement based on the changes
         // in the coordinates.
@@ -594,7 +629,7 @@ var LibraryBrowser = {
           adjustedY = adjustedY * (ch / rect.height);
 
           var coords = { x: adjustedX, y: adjustedY };
-          
+
           if (event.type === 'touchstart') {
             Browser.lastTouches[touch.identifier] = coords;
             Browser.touches[touch.identifier] = coords;
@@ -603,7 +638,7 @@ var LibraryBrowser = {
             if (!last) last = coords;
             Browser.lastTouches[touch.identifier] = last;
             Browser.touches[touch.identifier] = coords;
-          } 
+          }
           return;
         }
 
@@ -657,22 +692,24 @@ var LibraryBrowser = {
     windowedWidth: 0,
     windowedHeight: 0,
     setFullscreenCanvasSize: function() {
-      // check if SDL is available   
+      // check if SDL is available
       if (typeof SDL != "undefined") {
-      	var flags = {{{ makeGetValue('SDL.screen+Runtime.QUANTUM_SIZE*0', '0', 'i32', 0, 1) }}};
-      	flags = flags | 0x00800000; // set SDL_FULLSCREEN flag
-      	{{{ makeSetValue('SDL.screen+Runtime.QUANTUM_SIZE*0', '0', 'flags', 'i32') }}}
+        var flags = {{{ makeGetValue('SDL.screen', '0', 'i32', 0, 1) }}};
+        flags = flags | 0x00800000; // set SDL_FULLSCREEN flag
+        {{{ makeSetValue('SDL.screen', '0', 'flags', 'i32') }}}
       }
+      Browser.updateCanvasDimensions(Module['canvas']);
       Browser.updateResizeListeners();
     },
 
     setWindowedCanvasSize: function() {
-      // check if SDL is available       
+      // check if SDL is available
       if (typeof SDL != "undefined") {
-      	var flags = {{{ makeGetValue('SDL.screen+Runtime.QUANTUM_SIZE*0', '0', 'i32', 0, 1) }}};
-      	flags = flags & ~0x00800000; // clear SDL_FULLSCREEN flag
-      	{{{ makeSetValue('SDL.screen+Runtime.QUANTUM_SIZE*0', '0', 'flags', 'i32') }}}
+        var flags = {{{ makeGetValue('SDL.screen', '0', 'i32', 0, 1) }}};
+        flags = flags & ~0x00800000; // clear SDL_FULLSCREEN flag
+        {{{ makeSetValue('SDL.screen', '0', 'flags', 'i32') }}}
       }
+      Browser.updateCanvasDimensions(Module['canvas']);
       Browser.updateResizeListeners();
     },
 
@@ -743,9 +780,9 @@ var LibraryBrowser = {
     _file = PATH.resolve(FS.cwd(), _file);
     function doCallback(callback) {
       if (callback) {
-        var stack = Runtime.stackSave();
+        var stack = stackSave();
         Module['dynCall_vi'](callback, allocate(intArrayFromString(_file), 'i8', ALLOC_STACK));
-        Runtime.stackRestore(stack);
+        stackRestore(stack);
       }
     }
     var destinationDirectory = PATH.dirname(_file);
@@ -817,9 +854,9 @@ var LibraryBrowser = {
 
         FS.createDataFile( _file.substr(0, index), _file.substr(index + 1), new Uint8Array(http.response), true, true, false);
         if (onload) {
-          var stack = Runtime.stackSave();
+          var stack = stackSave();
           Module['dynCall_viii'](onload, handle, arg, allocate(intArrayFromString(_file), 'i8', ALLOC_STACK));
-          Runtime.stackRestore(stack);
+          stackRestore(stack);
         }
       } else {
         if (onerror) Module['dynCall_viii'](onerror, handle, arg, http.status);
@@ -846,12 +883,6 @@ var LibraryBrowser = {
     http.onabort = function http_onabort(e) {
       delete Browser.wgetRequests[handle];
     };
-
-    // Useful because the browser can limit the number of redirection
-    try {
-      if (http.channel instanceof Ci.nsIHttpChannel)
-      http.channel.redirectionLimit = 0;
-    } catch (ex) { /* whatever */ }
 
     if (_request == "POST") {
       //Send the proper header information along with the request
@@ -910,12 +941,6 @@ var LibraryBrowser = {
     http.onabort = function http_onabort(e) {
       delete Browser.wgetRequests[handle];
     };
-
-    // Useful because the browser can limit the number of redirection
-    try {
-      if (http.channel instanceof Ci.nsIHttpChannel)
-      http.channel.redirectionLimit = 0;
-    } catch (ex) { /* whatever */ }
 
     if (_request == "POST") {
       //Send the proper header information along with the request
@@ -1002,8 +1027,8 @@ var LibraryBrowser = {
 
   // TODO: currently not callable from a pthread, but immediately calls onerror() if not on main thread.
   emscripten_async_load_script: function(url, onload, onerror) {
-    onload = Runtime.getFuncWrapper(onload, 'v');
-    onerror = Runtime.getFuncWrapper(onerror, 'v');
+    onload = getFuncWrapper(onload, 'v');
+    onerror = getFuncWrapper(onerror, 'v');
 
 #if USE_PTHREADS
     if (ENVIRONMENT_IS_PTHREAD) {
@@ -1090,7 +1115,11 @@ var LibraryBrowser = {
   },
 
   // Runs natively in pthread, no __proxy needed.
+#if OFFSCREEN_FRAMEBUFFER
+  emscripten_set_main_loop__deps: ['emscripten_set_main_loop_timing', 'emscripten_get_now', 'emscripten_webgl_commit_frame'],
+#else
   emscripten_set_main_loop__deps: ['emscripten_set_main_loop_timing', 'emscripten_get_now'],
+#endif
   emscripten_set_main_loop: function(func, fps, simulateInfiniteLoop, arg, noSetTiming) {
     Module['noExitRuntime'] = true;
 
@@ -1131,10 +1160,10 @@ var LibraryBrowser = {
         }
         console.log('main loop blocker "' + blocker.name + '" took ' + (Date.now() - start) + ' ms'); //, left: ' + Browser.mainLoop.remainingBlockers);
         Browser.mainLoop.updateStatus();
-        
+
         // catches pause/resume main loop from blocker execution
         if (thisMainLoopId < Browser.mainLoop.currentlyRunningMainloop) return;
-        
+
         setTimeout(Browser.mainLoop.runner, 0);
         return;
       }
@@ -1158,16 +1187,26 @@ var LibraryBrowser = {
       GL.newRenderingFrameStarted();
 #endif
 
+#if USE_PTHREADS
+#if OFFSCREEN_FRAMEBUFFER
+      // If the current GL context is a proxied regular WebGL context, and was initialized with implicit swap mode on the main thread, and we are on the parent thread,
+      // perform the swap on behalf of the user.
+      if (typeof GL !== 'undefined' && GL.currentContext && GLctxIsOnParentThread) {
+        var explicitSwapControl = {{{ makeGetValue('GL.currentContext', 0, 'i32') }}};
+        if (!explicitSwapControl) _emscripten_webgl_commit_frame();
+      }
+#endif
+#endif
+
 #if OFFSCREENCANVAS_SUPPORT
-      // If the current GL context is an OffscreenCanvas, but it was initialized with implicit swap mode, perform the swap
-      // in behalf of the user.
-      if (typeof GL !== 'undefined' && GL.currentContext && !GL.currentContext.attributes.explicitSwapControl && GL.currentContext.GLctx.commit) {
+      // If the current GL context is an OffscreenCanvas, but it was initialized with implicit swap mode, perform the swap on behalf of the user.
+      if (typeof GL !== 'undefined' && GL.currentContext && !GLctxIsOnParentThread && !GL.currentContext.attributes.explicitSwapControl && GL.currentContext.GLctx.commit) {
         GL.currentContext.GLctx.commit();
       }
 #endif
 
       if (Browser.mainLoop.method === 'timeout' && Module.ctx) {
-        Module.printErr('Looks like you are rendering without using requestAnimationFrame for the main loop. You should use 0 for the frame rate in emscripten_set_main_loop in order to use requestAnimationFrame, as that can greatly improve your frame rates!');
+        err('Looks like you are rendering without using requestAnimationFrame for the main loop. You should use 0 for the frame rate in emscripten_set_main_loop in order to use requestAnimationFrame, as that can greatly improve your frame rates!');
         Browser.mainLoop.method = ''; // just warn once per call to set main loop
       }
 
@@ -1251,7 +1290,7 @@ var LibraryBrowser = {
     Module['noExitRuntime'] = true;
 
     function wrapper() {
-      Runtime.getFuncWrapper(func, 'vi')(arg);
+      getFuncWrapper(func, 'vi')(arg);
     }
 
     if (millis >= 0) {
@@ -1270,8 +1309,13 @@ var LibraryBrowser = {
   emscripten_force_exit__proxy: 'sync',
   emscripten_force_exit__sig: 'vi',
   emscripten_force_exit: function(status) {
+#if NO_EXIT_RUNTIME
+#if ASSERTIONS
+    warnOnce('emscripten_force_exit cannot actually shut down the runtime, as the build has NO_EXIT_RUNTIME set');
+#endif
+#endif
     Module['noExitRuntime'] = false;
-    Module['exit'](status);
+    exit(status);
   },
 
   emscripten_get_device_pixel_ratio__proxy: 'sync',
@@ -1299,7 +1343,7 @@ var LibraryBrowser = {
   emscripten_set_canvas_size: function(width, height) {
     Browser.setCanvasSize(width, height);
   },
-  
+
   emscripten_get_canvas_size__proxy: 'sync',
   emscripten_get_canvas_size__sig: 'viii',
   emscripten_get_canvas_size: function(width, height, isFullscreen) {
@@ -1372,7 +1416,7 @@ var LibraryBrowser = {
     if (callback) {
       callbackId = info.callbacks.length;
       info.callbacks.push({
-        func: Runtime.getFuncWrapper(callback, 'viii'),
+        func: getFuncWrapper(callback, 'viii'),
         arg: arg
       });
       info.awaited++;
@@ -1481,10 +1525,9 @@ function slowLog(label, text) {
   if (!slowLog.labels[label]) slowLog.labels[label] = 0;
   var now = Date.now();
   if (now - slowLog.labels[label] > 1000) {
-    Module.print(label + ': ' + text);
+    out(label + ': ' + text);
     slowLog.labels[label] = now;
   }
 }
 
 */
-

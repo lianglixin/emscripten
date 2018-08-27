@@ -62,10 +62,16 @@ function preprocess(text, filenameHint) {
                 error('unsupported preprocessor op ' + op);
               }
             } else {
+              // Check if a value is truthy.
+              var short = ident[0] === '!' ? ident.substr(1) : ident;
+              var truthy = short in this;
+              if (truthy) {
+                truthy = !!this[short];
+              }
               if (ident[0] === '!') {
-                showStack.push(!(this[ident.substr(1)] > 0));
+                showStack.push(!truthy);
               } else {
-                showStack.push(ident in this && this[ident] > 0);
+                showStack.push(truthy);
               }
             }
           } else if (line[2] == 'n') { // include
@@ -1313,7 +1319,7 @@ function makeStructuralReturn(values, inAsm) {
   return 'return ' + asmCoercion(values.slice(1).map(function(value) {
     i++;
     if (!inAsm) {
-      return 'Runtime.setTempRet' + i + '(' + value + ')';
+      return 'setTempRet' + i + '(' + value + ')';
     }
     if (i === 0) {
       return makeSetTempRet0(value)
@@ -1461,8 +1467,8 @@ function makeEval(code) {
   var ret = '';
   if (NO_DYNAMIC_EXECUTION == 2) {
     // Warn on evals, but proceed.
-    ret += "Module.printErr('Warning: NO_DYNAMIC_EXECUTION=2 was set, but calling eval in the following location:');\n";
-    ret += "Module.printErr(stackTrace());\n";
+    ret += "err('Warning: NO_DYNAMIC_EXECUTION=2 was set, but calling eval in the following location:');\n";
+    ret += "err(stackTrace());\n";
   }
   ret += code;
   return ret;
@@ -1471,5 +1477,16 @@ function makeEval(code) {
 function makeStaticAlloc(size) {
   size = (size + (STACK_ALIGN-1)) & -STACK_ALIGN;
   return 'STATICTOP; STATICTOP += ' + size + ';';
+}
+
+function makeRetainedCompilerSettings() {
+  var blacklist = set('STRUCT_INFO');
+  var ret = {};
+  for (var x in this) {
+    try {
+      if (x[0] !== '_' && !(x in blacklist) && x == x.toUpperCase() && (typeof this[x] === 'number' || typeof this[x] === 'string' || this.isArray())) ret[x] = this[x];
+    } catch(e){}
+  }
+  return ret;
 }
 

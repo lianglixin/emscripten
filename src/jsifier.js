@@ -37,6 +37,9 @@ var NEED_ALL_ASM2WASM_IMPORTS = BINARYEN_METHOD != 'native-wasm' || BINARYEN_TRA
 // the current compilation unit.
 var HAS_MAIN = ('_main' in IMPLEMENTED_FUNCTIONS) || MAIN_MODULE || SIDE_MODULE;
 
+var WASM_BACKEND_WITH_RESERVED_FUNCTION_POINTERS =
+  WASM_BACKEND && RESERVED_FUNCTION_POINTERS;
+
 // JSifier
 function JSify(data, functionsOnly) {
   var mainPass = !functionsOnly;
@@ -67,8 +70,13 @@ function JSify(data, functionsOnly) {
 
     var shellParts = read(shellFile).split('{{BODY}}');
     print(processMacros(preprocess(shellParts[0], shellFile)));
-    var preFile = BUILD_AS_SHARED_LIB || SIDE_MODULE ? 'preamble_sharedlib.js' : 'preamble.js';
-    var pre = processMacros(preprocess(read(preFile).replace('{{RUNTIME}}', getRuntime()), preFile));
+    var pre;
+    if (BUILD_AS_SHARED_LIB || SIDE_MODULE) {
+      pre = processMacros(preprocess(read('preamble_sharedlib.js'), 'preamble_sharedlib.js'));
+    } else {
+      pre = processMacros(preprocess(read('support.js'), 'support.js')) +
+            processMacros(preprocess(read('preamble.js'), 'preamble.js'));
+    }
     print(pre);
   }
 
@@ -114,8 +122,8 @@ function JSify(data, functionsOnly) {
     // name the function; overwrite if it's already named
     snippet = snippet.replace(/function(?:\s+([^(]+))?\s*\(/, 'function ' + finalName + '(');
     if (LIBRARY_DEBUG && !LibraryManager.library[ident + '__asm']) {
-      snippet = snippet.replace('{', '{ var ret = (function() { if (Runtime.debug) Module.printErr("[library call:' + finalName + ': " + Array.prototype.slice.call(arguments).map(Runtime.prettyPrint) + "]"); ');
-      snippet = snippet.substr(0, snippet.length-1) + '}).apply(this, arguments); if (Runtime.debug && typeof ret !== "undefined") Module.printErr("  [     return:" + Runtime.prettyPrint(ret)); return ret; \n}';
+      snippet = snippet.replace('{', '{ var ret = (function() { if (runtimeDebug) err("[library call:' + finalName + ': " + Array.prototype.slice.call(arguments).map(prettyPrint) + "]"); ');
+      snippet = snippet.substr(0, snippet.length-1) + '}).apply(this, arguments); if (runtimeDebug && typeof ret !== "undefined") err("  [     return:" + prettyPrint(ret)); return ret; \n}';
     }
     return snippet;
   }
@@ -130,7 +138,7 @@ function JSify(data, functionsOnly) {
     }
 
     var func = "function _emscripten_" + (sync ? '' : 'a') + 'sync_run_in_browser_thread_' + sig + '(func' + argsList(sig.length-1) + ') {\n';
-    if (sync) func += '  var waitAddress = Runtime.stackSave();\n';
+    if (sync) func += '  var waitAddress = stackSave();\n';
 
     function sizeofType(t) {
       switch(t) {
@@ -239,7 +247,7 @@ function JSify(data, functionsOnly) {
         }
         if (!(MAIN_MODULE || SIDE_MODULE)) {
           // emit a stub that will fail at runtime
-          LibraryManager.library[shortident] = new Function("Module['printErr']('missing function: " + shortident + "'); abort(-1);");
+          LibraryManager.library[shortident] = new Function("err('missing function: " + shortident + "'); abort(-1);");
         } else {
           var target = (MAIN_MODULE ? '' : 'parent') + "Module['_" + shortident + "']";
           var assertion = '';
@@ -381,7 +389,7 @@ function JSify(data, functionsOnly) {
         if (LibraryManager.library[shortident + '__asm']) {
           warn('cannot kill asm library function ' + item.ident);
         } else {
-          LibraryManager.library[shortident] = new Function("Module['printErr']('dead function: " + shortident + "'); abort(-1);");
+          LibraryManager.library[shortident] = new Function("err('dead function: " + shortident + "'); abort(-1);");
           delete LibraryManager.library[shortident + '__inline'];
           delete LibraryManager.library[shortident + '__deps'];
         }
@@ -421,13 +429,19 @@ function JSify(data, functionsOnly) {
         Variables.generatedGlobalBase = true;
         // Globals are done, here is the rest of static memory
         if (!SIDE_MODULE) {
-          print('STATIC_BASE = Runtime.GLOBAL_BASE;\n');
+          print('STATIC_BASE = GLOBAL_BASE;\n');
           print('STATICTOP = STATIC_BASE + ' + Runtime.alignMemory(Variables.nextIndexedOffset) + ';\n');
         } else {
-          print('gb = Runtime.alignMemory(getMemory({{{ STATIC_BUMP }}}, ' + MAX_GLOBAL_ALIGN + ' || 1));\n');
+          print('gb = alignMemory(getMemory({{{ STATIC_BUMP }}} + ' + MAX_GLOBAL_ALIGN + '), ' + MAX_GLOBAL_ALIGN + ' || 1);\n');
+          // The static area consists of explicitly initialized data, followed by zero-initialized data.
+          // The latter may need zeroing out if the MAIN_MODULE has already used this memory area before
+          // dlopen'ing the SIDE_MODULE.  Since we don't know the size of the explicitly initialized data
+          // here, we just zero the whole thing, which is suboptimal, but should at least resolve bugs
+          // from uninitialized memory.
+          print('for (var i = gb; i < gb + {{{ STATIC_BUMP }}}; ++i) HEAP8[i] = 0;\n');
           print('// STATICTOP = STATIC_BASE + ' + Runtime.alignMemory(Variables.nextIndexedOffset) + ';\n'); // comment as metadata only
         }
-        if (BINARYEN) {
+        if (WASM) {
           // export static base and bump, needed for linking in wasm binary's memory, dynamic linking, etc.
           print('var STATIC_BUMP = {{{ STATIC_BUMP }}};');
           print('Module["STATIC_BASE"] = STATIC_BASE;');
@@ -461,7 +475,7 @@ function JSify(data, functionsOnly) {
         if (USE_PTHREADS) {
           print('if (!ENVIRONMENT_IS_PTHREAD) {') // Pthreads should not initialize memory again, since it's shared with the main thread.
         }
-        print('/* memory initializer */ ' + makePointer(memoryInitialization, null, 'ALLOC_NONE', 'i8', 'Runtime.GLOBAL_BASE' + (SIDE_MODULE ? '+H_BASE' : ''), true));
+        print('/* memory initializer */ ' + makePointer(memoryInitialization, null, 'ALLOC_NONE', 'i8', 'GLOBAL_BASE' + (SIDE_MODULE ? '+H_BASE' : ''), true));
         if (USE_PTHREADS) {
           print('}')
         }
@@ -472,7 +486,7 @@ function JSify(data, functionsOnly) {
       if (!BUILD_AS_SHARED_LIB && !SIDE_MODULE) {
         if (USE_PTHREADS) {
           print('var tempDoublePtr;\n');
-          print('if (!ENVIRONMENT_IS_PTHREAD) tempDoublePtr = Runtime.alignMemory(allocate(12, "i8", ALLOC_STATIC), 8);\n');
+          print('if (!ENVIRONMENT_IS_PTHREAD) tempDoublePtr = alignMemory(allocate(12, "i8", ALLOC_STATIC), 8);\n');
         } else {
           print('var tempDoublePtr = ' + makeStaticAlloc(8) + '\n');
         }
@@ -519,11 +533,11 @@ function JSify(data, functionsOnly) {
         for(i in proxiedFunctionInvokers) print(proxiedFunctionInvokers[i]+'\n');
         print('if (!ENVIRONMENT_IS_PTHREAD) {\n // Only main thread initializes these, pthreads copy them over at thread worker init time (in pthread-main.js)');
       }
-      print('DYNAMICTOP_PTR = Runtime.staticAlloc(4);\n');
-      print('STACK_BASE = STACKTOP = Runtime.alignMemory(STATICTOP);\n');
-      if (STACK_START > 0) print('if (STACKTOP < ' + STACK_START + ') STACK_BASE = STACKTOP = Runtime.alignMemory(' + STACK_START + ');\n');
+      print('DYNAMICTOP_PTR = staticAlloc(4);\n');
+      print('STACK_BASE = STACKTOP = alignMemory(STATICTOP);\n');
+      if (STACK_START > 0) print('if (STACKTOP < ' + STACK_START + ') STACK_BASE = STACKTOP = alignMemory(' + STACK_START + ');\n');
       print('STACK_MAX = STACK_BASE + TOTAL_STACK;\n');
-      print('DYNAMIC_BASE = Runtime.alignMemory(STACK_MAX);\n');
+      print('DYNAMIC_BASE = alignMemory(STACK_MAX);\n');
       print('HEAP32[DYNAMICTOP_PTR>>2] = DYNAMIC_BASE;\n');
       print('staticSealed = true; // seal the static portion of memory\n');
       if (ASSERTIONS) print('assert(DYNAMIC_BASE < TOTAL_MEMORY, "TOTAL_MEMORY not big enough for stack");\n');
@@ -536,15 +550,9 @@ function JSify(data, functionsOnly) {
     print('var ASSERTIONS = ' + !!ASSERTIONS + ';\n');
 
     print(preprocess(read('arrayUtils.js')));
-    // Export all arrayUtils.js functions
-    print(maybeExport('intArrayFromString'));
-    print(maybeExport('intArrayToString'));
 
     if (SUPPORT_BASE64_EMBEDDING) {
       print(preprocess(read('base64Utils.js')));
-      // Export all base64Utils.js functions
-      print(maybeExport('intArrayFromBase64'));
-      print(maybeExport('tryParseAsDataURI'));
     }
 
     if (asmLibraryFunctions.length > 0) {
@@ -616,4 +624,3 @@ function JSify(data, functionsOnly) {
   dprint('framework', 'Big picture: Finishing JSifier, main pass=' + mainPass);
   //B.stop('jsifier');
 }
-

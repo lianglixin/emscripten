@@ -23,6 +23,12 @@ var DYNAMIC_BASE = 0;
 
 var ENVIRONMENT_IS_PTHREAD = true;
 
+// performance.now() is specced to return a wallclock time in msecs since that Web Worker/main thread launched. However for pthreads this can cause
+// subtle problems in emscripten_get_now() as this essentially would measure time from pthread_create(), meaning that the clocks between each threads
+// would be wildly out of sync. Therefore sync all pthreads to the clock on the main browser thread, so that different threads see a somewhat
+// coherent clock across each of them (+/- 0.1msecs in testing)
+var __performance_now_clock_drift = 0;
+
 // Cannot use console.log or console.error in a web worker, since that would risk a browser deadlock! https://bugzilla.mozilla.org/show_bug.cgi?id=1049091
 // Therefore implement custom logging facility for threads running in a worker, which queue the messages to main thread to print.
 var Module = {};
@@ -50,8 +56,8 @@ function threadAlert() {
   var text = Array.prototype.slice.call(arguments).join(' ');
   postMessage({cmd: 'alert', text: text, threadId: selfThreadId});
 }
-Module['print'] = threadPrint;
-Module['printErr'] = threadPrintErr;
+out = threadPrint;
+err = threadPrintErr;
 this.alert = threadAlert;
 
 // #if WASM
@@ -106,6 +112,7 @@ this.onmessage = function(e) {
     } else if (e.data.cmd === 'objectTransfer') {
       PThread.receiveObjectTransfer(e.data);
     } else if (e.data.cmd === 'run') { // This worker was idle, and now should start executing its pthread entry point.
+      __performance_now_clock_drift = performance.now() - e.data.time; // Sync up to the clock of the main thread.
       threadInfoStruct = e.data.threadInfoStruct;
       __register_pthread_ptr(threadInfoStruct, /*isMainBrowserThread=*/0, /*isMainRuntimeThread=*/0); // Pass the thread address inside the asm.js scope to store it for fast access that avoids the need for a FFI out.
       assert(threadInfoStruct);
@@ -119,24 +126,25 @@ this.onmessage = function(e) {
       STACK_MAX = STACK_BASE + e.data.stackSize;
       assert(STACK_BASE != 0);
       assert(STACK_MAX > STACK_BASE);
-      Runtime.establishStackSpace(e.data.stackBase, e.data.stackBase + e.data.stackSize);
+      Module['establishStackSpace'](e.data.stackBase, e.data.stackBase + e.data.stackSize);
       var result = 0;
 //#if STACK_OVERFLOW_CHECK
       if (typeof writeStackCookie === 'function') writeStackCookie();
 //#endif
 
       PThread.receiveObjectTransfer(e.data);
-
       PThread.setThreadStatus(_pthread_self(), 1/*EM_THREAD_STATUS_RUNNING*/);
 
       try {
-        // HACK: Some code in the wild has instead signatures of form 'void *ThreadMain()', which seems to be ok in native code.
-        // To emulate supporting both in test suites, use the following form. This is brittle!
-        if (typeof Module['asm']['dynCall_ii'] !== 'undefined') {
-          result = Module['asm'].dynCall_ii(e.data.start_routine, e.data.arg); // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
-        } else {
-          result = Module['asm'].dynCall_i(e.data.start_routine); // as a hack, try signature 'i' as fallback.
-        }
+        // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
+        // Native codebases sometimes spawn threads with other thread entry point signatures,
+        // such as void ThreadMain(void *arg), void *ThreadMain(), or void ThreadMain().
+        // That is not acceptable per C/C++ specification, but x86 compiler ABI extensions
+        // enable that to work. If you find the following line to crash, either change the signature
+        // to "proper" void *ThreadMain(void *arg) form, or try linking with the Emscripten linker
+        // flag -s EMULATE_FUNCTION_POINTER_CASTS=1 to add in emulation for this x86 ABI extension.
+        result = Module['dynCall_ii'](e.data.start_routine, e.data.arg);
+
 //#if STACK_OVERFLOW_CHECK
         if (typeof checkStackCookie === 'function') checkStackCookie();
 //#endif
@@ -156,16 +164,19 @@ this.onmessage = function(e) {
       }
       // The thread might have finished without calling pthread_exit(). If so, then perform the exit operation ourselves.
       // (This is a no-op if explicit pthread_exit() had been called prior.)
-      if (!Module['noExitRuntime']) PThread.threadExit(result);
-      else console.log('pthread noExitRuntime: not quitting.');
+      PThread.threadExit(result);
     } else if (e.data.cmd === 'cancel') { // Main thread is asking for a pthread_cancel() on this thread.
       if (threadInfoStruct && PThread.thisThreadCancelState == 0/*PTHREAD_CANCEL_ENABLE*/) {
         PThread.threadCancel();
       }
     } else if (e.data.target === 'setimmediate') {
       // no-op
+    } else if (e.data.cmd === 'processThreadQueue') {
+      if (threadInfoStruct) { // If this thread is actually running?
+        _emscripten_current_thread_process_queued_calls();
+      }
     } else {
-      Module['printErr']('pthread-main.js received unknown command ' + e.data.cmd);
+      err('pthread-main.js received unknown command ' + e.data.cmd);
       console.error(e.data);
     }
   } catch(e) {

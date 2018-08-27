@@ -2,7 +2,7 @@ from .toolchain_profiler import ToolchainProfiler
 import time, os, sys, logging
 from subprocess import Popen, PIPE, STDOUT
 
-TRACK_PROCESS_SPAWNS = True if (os.getenv('EM_BUILD_VERBOSE') and int(os.getenv('EM_BUILD_VERBOSE')) >= 3) else False
+TRACK_PROCESS_SPAWNS = int(os.getenv('EM_BUILD_VERBOSE', '0')) >= 3
 WORKING_ENGINES = {} # Holds all configured engines and whether they work: maps path -> True/False
 __rootpath__ = os.path.dirname(os.path.dirname(__file__))
 
@@ -100,7 +100,8 @@ def run_js(filename, engine=None, args=[], check_timeout=False, stdin=None, stdo
         stdin=stdin,
         stdout=stdout,
         stderr=stderr,
-        cwd=cwd)
+        cwd=cwd,
+        universal_newlines=True)
   except Exception as e:
     # the failure may be because the engine is not present. show the proper
     # error in that case

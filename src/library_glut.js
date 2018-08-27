@@ -289,7 +289,8 @@ var LibraryGLUT = {
         document.removeEventListener('mozfullscreenchange', GLUT.onFullscreenEventChange, true);
         document.removeEventListener('webkitfullscreenchange', GLUT.onFullscreenEventChange, true);
       }
-      Browser.setCanvasSize(width, height);
+      Browser.setCanvasSize(width, height, true); // N.B. GLUT.reshapeFunc is also registered as a canvas resize callback.
+                                                  // Just call it once here.
       /* Can't call _glutReshapeWindow as that requests cancelling fullscreen. */
       if (GLUT.reshapeFunc) {
         // console.log("GLUT.reshapeFunc (from FS): " + width + ", " + height);
@@ -299,11 +300,11 @@ var LibraryGLUT = {
     },
 
     requestFullscreen: function() {
-      Browser.requestFullscreen(/*lockPointer=*/false, /*resieCanvas=*/false);
+      Browser.requestFullscreen(/*lockPointer=*/false, /*resizeCanvas=*/false);
     },
 
     requestFullScreen: function() {
-      Module.printErr('GLUT.requestFullScreen() is deprecated. Please call GLUT.requestFullscreen instead.');
+      err('GLUT.requestFullScreen() is deprecated. Please call GLUT.requestFullscreen instead.');
       GLUT.requestFullScreen = function() {
         return GLUT.requestFullscreen();
       }
@@ -320,7 +321,7 @@ var LibraryGLUT = {
     },
 
     cancelFullScreen: function() {
-      Module.printErr('GLUT.cancelFullScreen() is deprecated. Please call GLUT.exitFullscreen instead.');
+      err('GLUT.cancelFullScreen() is deprecated. Please call GLUT.exitFullscreen instead.');
       GLUT.cancelFullScreen = function() {
         return GLUT.exitFullscreen();
       }
@@ -564,6 +565,10 @@ var LibraryGLUT = {
       stencil: ((GLUT.initDisplayMode & 0x0020 /*GLUT_STENCIL*/) != 0),
       alpha: ((GLUT.initDisplayMode & 0x0008 /*GLUT_ALPHA*/) != 0)
     };
+#if OFFSCREEN_FRAMEBUFFER
+    // TODO: Make glutCreateWindow explicitly aware of whether it is being proxied or not, and set these to true only when proxying is being performed.
+    GL.enableOffscreenFramebufferAttributes(contextAttributes);
+#endif
     Module.ctx = Browser.createContext(Module['canvas'], true, true, contextAttributes);
     return Module.ctx ? 1 /* a new GLUT window ID for the created context */ : 0 /* failure */;
   },
@@ -577,7 +582,8 @@ var LibraryGLUT = {
   glutReshapeWindow__deps: ['$GLUT', 'glutPostRedisplay'],
   glutReshapeWindow: function(width, height) {
     GLUT.exitFullscreen();
-    Browser.setCanvasSize(width, height);
+    Browser.setCanvasSize(width, height, true); // N.B. GLUT.reshapeFunc is also registered as a canvas resize callback.
+                                                // Just call it once here.
     if (GLUT.reshapeFunc) {
       Module['dynCall_vii'](GLUT.reshapeFunc, width, height);
     }

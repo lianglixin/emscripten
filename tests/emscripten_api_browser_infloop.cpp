@@ -27,11 +27,11 @@ struct Class {
     instance = this;
 
     EM_ASM({
-      var initial = Runtime.stackSave();
-      Module.print('seeing initial stack of ' + initial);
+      var initial = stackSave();
+      out('seeing initial stack of ' + initial);
       setTimeout(function() {
-        var current = Runtime.stackSave();
-        Module.print('seeing later stack of   ' + current);
+        var current = stackSave();
+        out('seeing later stack of   ' + current);
         assert(current === initial);
       }, 0);
     });

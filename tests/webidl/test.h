@@ -55,7 +55,7 @@ class StringUser {
   char *s;
   int i;
 public:
-  StringUser(char *string="NO", int integer=99) : s(strdup(string)), i(integer) {}
+  StringUser(const char *string="NO", int integer=99) : s(strdup(string)), i(integer) {}
   ~StringUser() { free(s); }
   void Print(int anotherInteger, char *anotherString) {
     printf("|%s|%d|%s|%d|\n", s, i, anotherString, anotherInteger);
@@ -82,10 +82,15 @@ struct VoidPointerUser {
 
 namespace Space {
   struct Inner {
-    Inner() {}
+    int value;
+    Inner() : value(1) {}
     int get() { return 198; }
     Inner& operator*=(float x) { return *this; }
     int operator[](int x) { return x*2; }
+    void operator+=(const Inner& other) {
+      value += other.value;
+      printf("Inner::+= => %d\n", value);
+    }
   };
 }
 
@@ -122,7 +127,7 @@ class TypeTestClass {
   void AcceptUnsignedShortMethod(unsigned short x) { printf("unsigned short int: %u\n", x); }
 
   unsigned long ReturnUnsignedLongMethod() { return 0xffffffff; }
-  void AcceptUnsignedLongMethod(unsigned long x) { printf("unsigned long int: %u\n", x); }
+  void AcceptUnsignedLongMethod(unsigned long x) { printf("unsigned long int: %lu\n", x); }
 };
 
 struct StructInArray {

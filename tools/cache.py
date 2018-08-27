@@ -29,10 +29,12 @@ class Cache(object):
     self.filelock = filelock.FileLock(self.filelock_name)
 
     if use_subdir:
-      if shared.Settings.WASM_BACKEND:
-        dirname = os.path.join(dirname, 'wasm')
-      else:
+      if not shared.Settings.WASM_BACKEND:
         dirname = os.path.join(dirname, 'asmjs')
+      elif shared.Settings.WASM_OBJECT_FILES:
+        dirname = os.path.join(dirname, 'wasm_o')
+      else:
+        dirname = os.path.join(dirname, 'wasm_bc')
     self.dirname = dirname
     self.debug = debug
     self.acquired_count = 0
@@ -86,7 +88,7 @@ class Cache(object):
   # the given creator function
   def get(self, shortname, creator, extension='.bc', what=None, force=False):
     if not shortname.endswith(extension): shortname += extension
-    cachename = os.path.join(self.dirname, shortname)
+    cachename = os.path.abspath(os.path.join(self.dirname, shortname))
 
     self.acquire_cache_lock()
     try:

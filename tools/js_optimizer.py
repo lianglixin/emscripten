@@ -55,41 +55,21 @@ def split_funcs(js, just_split=False):
     funcs.append((ident, func))
   return funcs
 
-def find_msbuild(sln_file, make_env):
-  search_paths_vs2013 = [('ProgramFiles', 'MSBuild/12.0/Bin/amd64'),
-                         ('ProgramFiles(x86)', 'MSBuild/12.0/Bin/amd64'),
-                         ('ProgramFiles', 'MSBuild/12.0/Bin'),
-                         ('ProgramFiles(x86)', 'MSBuild/12.0/Bin'),]
-  search_paths_old = [("WINDIR", 'Microsoft.NET/Framework/v4.0.30319'),]
-  contents = open(sln_file, 'r').read()
-  if '# Visual Studio Express 2013' in contents or '# Visual Studio 2013' in contents:
-    search_paths = search_paths_vs2013 + search_paths_old
-    pf_path = os.environ.get('ProgramFiles(x86)')
-    if not pf_path:
-      pf_path = os.environ.get('ProgramFiles')
-    make_env['VCTargetsPath'] = os.path.join(pf_path, 'MSBuild/Microsoft.Cpp/v4.0/V120')
-  else:
-    search_paths = search_paths_old + search_paths_vs2013
-  for pf, path in search_paths:
-    pf_path = os.environ.get(pf)
-    if not pf_path: continue
-    p = os.path.join(pf_path, path, 'MSBuild.exe')
-    if os.path.isfile(p): return [p, make_env]
-  return [None, make_env]
-
 def get_native_optimizer():
   if os.environ.get('EMCC_FAST_COMPILER') == '0':
     logging.critical('Non-fastcomp compiler is no longer available, please use fastcomp or an older version of emscripten')
     sys.exit(1)
 
   # Allow users to override the location of the optimizer executable by setting an environment variable EMSCRIPTEN_NATIVE_OPTIMIZER=/path/to/optimizer(.exe)
-  if os.environ.get('EMSCRIPTEN_NATIVE_OPTIMIZER') and len(os.environ.get('EMSCRIPTEN_NATIVE_OPTIMIZER')) > 0:
-    logging.debug('env forcing native optimizer at ' + os.environ.get('EMSCRIPTEN_NATIVE_OPTIMIZER'))
-    return os.environ.get('EMSCRIPTEN_NATIVE_OPTIMIZER')
+  opt = os.environ.get('EMSCRIPTEN_NATIVE_OPTIMIZER', '')
+  if len(opt):
+    logging.debug('env forcing native optimizer at ' + opt)
+    return opt
   # Also, allow specifying the location of the optimizer in .emscripten configuration file under EMSCRIPTEN_NATIVE_OPTIMIZER='/path/to/optimizer'
-  if hasattr(shared, 'EMSCRIPTEN_NATIVE_OPTIMIZER') and len(shared.EMSCRIPTEN_NATIVE_OPTIMIZER) > 0:
-    logging.debug('config forcing native optimizer at ' + shared.EMSCRIPTEN_NATIVE_OPTIMIZER)
-    return shared.EMSCRIPTEN_NATIVE_OPTIMIZER
+  opt = getattr(shared, 'EMSCRIPTEN_NATIVE_OPTIMIZER', '')
+  if len(opt):
+    logging.debug('config forcing native optimizer at ' + opt)
+    return opt
 
   FAIL_MARKER = shared.Cache.get_path('optimizer.building_failed')
   if os.path.exists(FAIL_MARKER):
@@ -123,27 +103,41 @@ def get_native_optimizer():
         if WINDOWS:
           # Poor man's check for whether or not we should attempt 64 bit build
           if os.environ.get('ProgramFiles(x86)'):
-            cmake_generators = ['Visual Studio 12 Win64', 'Visual Studio 12', 'Visual Studio 11 Win64', 'Visual Studio 11', 'MinGW Makefiles', 'Unix Makefiles']
+            cmake_generators = [
+              'Visual Studio 15 2017 Win64',
+              'Visual Studio 15 2017',
+              'Visual Studio 14 2015 Win64',
+              'Visual Studio 14 2015',
+              'Visual Studio 12 Win64', # The year component is omitted for compatibility with older CMake.
+              'Visual Studio 12',
+              'Visual Studio 11 Win64',
+              'Visual Studio 11',
+              'MinGW Makefiles',
+              'Unix Makefiles',
+            ]
           else:
-            cmake_generators = ['Visual Studio 12', 'Visual Studio 11', 'MinGW Makefiles', 'Unix Makefiles']
+            cmake_generators = [
+              'Visual Studio 15 2017',
+              'Visual Studio 14 2015',
+              'Visual Studio 12',
+              'Visual Studio 11',
+              'MinGW Makefiles',
+              'Unix Makefiles',
+            ]
         else:
           cmake_generators = ['Unix Makefiles']
 
         for cmake_generator in cmake_generators:
+          # Delete CMakeCache.txt so that we can switch to a new CMake generator.
+          shared.try_delete(os.path.join(build_path, 'CMakeCache.txt'))
           proc = subprocess.Popen(['cmake', '-G', cmake_generator, '-DCMAKE_BUILD_TYPE='+cmake_build_type, shared.path_from_root('tools', 'optimizer')], cwd=build_path, stdin=log_output, stdout=log_output, stderr=log_output)
           proc.communicate()
-          make_env = os.environ.copy()
           if proc.returncode == 0:
+            make = ['cmake', '--build', build_path]
             if 'Visual Studio' in cmake_generator:
-              ret = find_msbuild(os.path.join(build_path, 'asmjs_optimizer.sln'), make_env)
-              make = [ret[0], '/t:Build', '/p:Configuration='+cmake_build_type, '/nologo', '/verbosity:minimal', 'asmjs_optimizer.sln']
-              make_env = ret[1]
-            elif 'MinGW' in cmake_generator:
-              make = ['mingw32-make']
-            else:
-              make = ['make']
+              make += ['--config', cmake_build_type, '--', '/nologo', '/verbosity:minimal']
 
-            proc = subprocess.Popen(make, cwd=build_path, stdin=log_output, stdout=log_output, stderr=log_output, env=make_env)
+            proc = subprocess.Popen(make, cwd=build_path, stdin=log_output, stdout=log_output, stderr=log_output)
             proc.communicate()
             if proc.returncode == 0:
               if WINDOWS and 'Visual Studio' in cmake_generator:
@@ -151,9 +145,6 @@ def get_native_optimizer():
               else:
                 shutil.copyfile(os.path.join(build_path, 'optimizer'), output)
               return output
-            else:
-              shared.try_delete(os.path.join(build_path, 'CMakeCache.txt'))
-              # Proceed to next iteration of the loop to try next possible CMake generator.
 
         raise NativeOptimizerCreationException()
 
@@ -193,7 +184,7 @@ def get_native_optimizer():
     shared.logging.debug('to see compiler errors, build with EMCC_NATIVE_OPTIMIZER=g')
   def show_build_errors(outs, errs):
     for i in range(len(outs)):
-      shared.logging.debug('output from attempt ' + str(i) + ': ' + outs[i] + '\n===========\n' + errs[i])
+      shared.logging.debug('output from attempt ' + str(i) + ':\n' + shared.asstr(outs[i]) + '\n===========\n' + shared.asstr(errs[i]))
 
   if NATIVE_OPTIMIZER == '1':
     return get_optimizer('optimizer.exe', [], ignore_build_errors)
@@ -246,13 +237,13 @@ class Minifier(object):
       f.write('// EXTRA_INFO:' + json.dumps(self.serialize()))
       f.close()
 
-      output = subprocess.Popen(self.js_engine +
+      output = shared.run_process(self.js_engine +
           [JS_OPTIMIZER, temp_file, 'minifyGlobals', 'noPrintMetadata'] +
           (['minifyWhitespace'] if minify_whitespace else []) +
           (['--debug'] if source_map else []),
-          stdout=subprocess.PIPE).communicate()[0]
+          stdout=subprocess.PIPE).stdout
 
-    assert len(output) > 0 and not output.startswith('Assertion failed'), 'Error in js optimizer: ' + output
+    assert len(output) and not output.startswith('Assertion failed'), 'Error in js optimizer: ' + output
     #print >> sys.stderr, "minified SHELL 3333333333333333", output, "\n44444444444444444444"
     code, metadata = output.split('// EXTRA_INFO:')
     self.globs = json.loads(metadata)
@@ -289,15 +280,13 @@ def run_on_chunk(command):
       while os.path.exists(saved): saved = 'input' + str(int(saved.replace('input', '').replace('.txt', ''))+1) + '.txt'
       print('running js optimizer command', ' '.join([c if c != filename else saved for c in command]), file=sys.stderr)
       shutil.copyfile(filename, os.path.join(shared.get_emscripten_temp_dir(), saved))
-    if shared.EM_BUILD_VERBOSE_LEVEL >= 3: print('run_on_chunk: ' + str(command), file=sys.stderr)
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE)
-    output = proc.communicate()[0]
+    if shared.EM_BUILD_VERBOSE >= 3: print('run_on_chunk: ' + str(command), file=sys.stderr)
+    proc = shared.run_process(command, stdout=subprocess.PIPE)
+    output = proc.stdout
     assert proc.returncode == 0, 'Error in optimizer (return code ' + str(proc.returncode) + '): ' + output
-    assert len(output) > 0 and not output.startswith('Assertion failed'), 'Error in optimizer: ' + output
+    assert len(output) and not output.startswith('Assertion failed'), 'Error in optimizer: ' + output
     filename = temp_files.get(os.path.basename(filename) + '.jo.js').name
-    # Important to write out in binary mode, because the data we are writing contains Windows line endings '\r\n' because it was PIPED from console.
-    # Otherwise writing \r\n to ascii mode file will result in Windows amplifying \n to \r\n, generating bad \r\r\n line endings.
-    f = open(filename, 'wb')
+    f = open(filename, 'w')
     f.write(output)
     f.close()
     if DEBUG and not shared.WINDOWS: print('.', file=sys.stderr) # Skip debug progress indicator on Windows, since it doesn't buffer well with multiple threads printing to console.
@@ -358,7 +347,7 @@ def run_on_js(filename, passes, js_engine, source_map=False, extra_info=None, ju
         class Finals(object):
           buf = []
         def process(line):
-          if len(line) > 0 and (line.startswith(('Module[', 'if (globalScope)')) or line.endswith('["X"]=1;')):
+          if len(line) and (line.startswith(('Module[', 'if (globalScope)')) or line.endswith('["X"]=1;')):
             Finals.buf.append(line)
             return False
           return True
@@ -417,7 +406,7 @@ EMSCRIPTEN_FUNCS();
   with ToolchainProfiler.profile_block('js_optimizer.split_to_chunks'):
     # if we are making source maps, we want our debug numbering to start from the
     # top of the file, so avoid breaking the JS into chunks
-    cores = 1 if source_map else int(os.environ.get('EMCC_CORES') or multiprocessing.cpu_count())
+    cores = 1 if source_map else shared.Building.get_num_cores()
 
     if not just_split:
       intended_num_chunks = int(round(cores * NUM_CHUNKS_PER_CORE))
@@ -427,11 +416,11 @@ EMSCRIPTEN_FUNCS();
       # keep same chunks as before
       chunks = [f[1] for f in funcs]
 
-    chunks = [chunk for chunk in chunks if len(chunk) > 0]
-    if DEBUG and len(chunks) > 0: print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(map(len, chunks)), '-', min(map(len, chunks)), file=sys.stderr)
+    chunks = [chunk for chunk in chunks if len(chunk)]
+    if DEBUG and len(chunks): print('chunkification: num funcs:', len(funcs), 'actual num chunks:', len(chunks), 'chunk size range:', max(map(len, chunks)), '-', min(map(len, chunks)), file=sys.stderr)
     funcs = None
 
-    if len(chunks) > 0:
+    if len(chunks):
       serialized_extra_info = suffix_marker + '\n'
       if minify_globals:
         serialized_extra_info += '// EXTRA_INFO:' + json.dumps(minify_info)
@@ -450,7 +439,7 @@ EMSCRIPTEN_FUNCS();
       filenames = []
 
   with ToolchainProfiler.profile_block('run_optimizer'):
-    if len(filenames) > 0:
+    if len(filenames):
       if not use_native(passes, source_map) or not get_native_optimizer():
         commands = [js_engine +
             [JS_OPTIMIZER, filename, 'noPrintMetadata'] +
@@ -518,9 +507,17 @@ EMSCRIPTEN_FUNCS();
       after = 'wakaUnknownAfter'
       start = coutput.find(after)
       end = coutput.find(')', start)
-      # First brace is from Closure Compiler comment, thus we need a second one
-      pre_2_second_brace = pre_2.find('{', pre_2.find('{')+1)
-      pre = coutput[:start] + '(/** @suppress {uselessCode} */ function(global,env,buffer) {\n' + pre_2[pre_2_second_brace+1:]
+      # If the closure comment to suppress useless code is present, we need to look one
+      # brace past it, as the first is in there. Otherwise, the first brace is the
+      # start of the function body (what we want).
+      USELESS_CODE_COMMENT = '/** @suppress {uselessCode} */ '
+      USELESS_CODE_COMMENT_BODY = 'uselessCode'
+      brace = pre_2.find('{') + 1
+      has_useless_code_comment = False
+      if pre_2[brace:brace + len(USELESS_CODE_COMMENT_BODY)] == USELESS_CODE_COMMENT_BODY:
+        brace = pre_2.find('{', brace) + 1
+        has_useless_code_comment = True
+      pre = coutput[:start] + '(' + (USELESS_CODE_COMMENT if has_useless_code_comment else '') + 'function(global,env,buffer) {\n' + pre_2[brace:]
       post = post_1 + end_asm + coutput[end+1:]
 
   with ToolchainProfiler.profile_block('write_pre'):
@@ -540,7 +537,7 @@ EMSCRIPTEN_FUNCS();
       if not os.environ.get('EMCC_NO_OPT_SORT'):
         funcs.sort(key=lambda x: (len(x[1]), x[0]), reverse=True)
 
-      if 'last' in passes and len(funcs) > 0:
+      if 'last' in passes and len(funcs):
         count = funcs[0][1].count('\n')
         if count > 3000:
           print('warning: Output contains some very large functions (%s lines in %s), consider building source files with -Os or -Oz, and/or trying OUTLINING_LIMIT to break them up (see settings.js; note that the parameter there affects AST nodes, while we measure lines here, so the two may not match up)' % (count, funcs[0][0]), file=sys.stderr)

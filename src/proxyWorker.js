@@ -129,7 +129,7 @@ window.close = function window_close() {
 };
 
 window.alert = function(text) {
-  Module.printErr('alert forever: ' + text);
+  err('alert forever: ' + text);
   while (1){};
 };
 
@@ -301,7 +301,7 @@ document.styleSheets = [{
 document.URL = 'http://worker.not.yet.ready.wait.for.window.onload?fake';
 
 function Audio() {
-  Runtime.warnOnce('faking Audio elements, no actual sound will play');
+  warnOnce('faking Audio elements, no actual sound will play');
 }
 Audio.prototype = new EventListener();
 Object.defineProperty(Audio.prototype, 'src', {
@@ -319,7 +319,7 @@ Audio.prototype.cloneNode = function() {
 }
 
 function AudioContext() {
-  Runtime.warnOnce('faking WebAudio elements, no actual sound will play');
+  warnOnce('faking WebAudio elements, no actual sound will play');
   function makeNode() {
     return {
       connect: function(){},
@@ -346,11 +346,11 @@ Module.canvas = document.createElement('canvas');
 
 Module.setStatus = function(){};
 
-Module.print = function Module_print(x) {
+out = function Module_print(x) {
   //dump('OUT: ' + x + '\n');
   postMessage({ target: 'stdout', content: x });
 };
-Module.printErr = function Module_printErr(x) {
+err = function Module_printErr(x) {
   //dump('ERR: ' + x + '\n');
   postMessage({ target: 'stderr', content: x });
 };

@@ -1,4 +1,8 @@
 #!/usr/bin/env python
+# Copyright 2014 The Emscripten Authors.  All rights reserved.
+# Emscripten is available under two separate licenses, the MIT license and the
+# University of Illinois/NCSA Open Source License.  Both these licenses can be
+# found in the LICENSE file.
 
 from __future__ import print_function
 import socket, json, sys, uuid, datetime, time, logging, cgi, zipfile, os, tempfile, atexit, subprocess, re, base64, struct, imghdr
@@ -192,7 +196,7 @@ def b2g_get_prefs_data():
 def b2g_get_pref(sub):
   prefs_data = b2g_get_prefs_data().split('\n')
   # Filter to find all prefs that have the substring 'sub' in them.
-  r = re.compile('user_pref\w*\(\w*"([^"]*)"\w*,\w*([^\)]*)')
+  r = re.compile(r'user_pref\w*\(\w*"([^"]*)"\w*,\w*([^\)]*)')
   for line in prefs_data:
     m = r.match(line)
     if m and (sub is None or sub in m.group(1)):
@@ -201,7 +205,7 @@ def b2g_get_pref(sub):
 def b2g_set_pref(pref, value):
   prefs_data = b2g_get_prefs_data().split('\n')
   # Remove any old value of this pref.
-  r = re.compile('user_pref\w*\(\w*"([^"]*)"\w*,\w*([^\)]*)')
+  r = re.compile(r'user_pref\w*\(\w*"([^"]*)"\w*,\w*([^\)]*)')
   new_prefs_data = []
   for line in prefs_data:
     m = r.match(line)

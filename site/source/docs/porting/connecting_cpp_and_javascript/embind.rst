@@ -766,7 +766,7 @@ the context, and from this context we can create an ``oscillator``,
 :cpp:func:`~emscripten::val::set` its properties (again using ``val``)
 and then play the tone.
 
-The example can be compiled on the Linux/Mac OS X terminal with::
+The example can be compiled on the Linux/macOS terminal with::
 
    ./emcc -O2 -Wall -Werror --bind -o oscillator.html oscillator.cpp
 
@@ -885,6 +885,15 @@ The following JavaScript can be used to interact with the above C++.
     // retrieve value from map
     console.log("Map Value: ", retMap.get(10));
 
+    // figure out which map keys are available
+    // NB! You must call `register_vector<key_type>`
+    // to make vectors available
+    var mapKeys = retMap.keys();
+    for (var i = 0; i < mapKeys.size(); i++) {
+        var key = mapKeys.get(i);
+        console.log("Map key/value: ", key, retMap.get(key));
+    }
+
     // reset the value at the given index position
     retMap.set(10, "OtherValue");
 
@@ -900,7 +909,7 @@ The call overhead for simple functions has been measured at about 200 ns.
 While there is room for further optimisation, so far its performance in
 real-world applications has proved to be more than acceptable.
 
-.. _Test Suite: https://github.com/kripken/emscripten/tree/master/tests/embind
+.. _Test Suite: https://github.com/emscripten-core/emscripten/tree/master/tests/embind
 .. _Connecting C++ and JavaScript on the Web with Embind: http://chadaustin.me/2014/09/connecting-c-and-javascript-on-the-web-with-embind/
 .. _Boost.Python: http://www.boost.org/doc/libs/1_56_0/libs/python/doc/
 .. _finalizers: http://en.wikipedia.org/wiki/Finalizer

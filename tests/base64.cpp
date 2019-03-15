@@ -1,3 +1,8 @@
+// Copyright 2017 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 // https://github.com/kostya/benchmarks/blob/master/base64/test.c
 
 #include "stdlib.h"
@@ -96,7 +101,7 @@ void encode(int size, const char* str, int* out_size, char** output) {
   *out_size = out - *output;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
   int TRIES;
 
   int arg = argc > 1 ? argv[1][0] - '0' : 3;

@@ -1,4 +1,9 @@
-# -*- encoding: utf8 -*-
+#!/usr/bin/env python
+# coding=utf-8
+# Copyright 2013 The Emscripten Authors.  All rights reserved.
+# Emscripten is available under two separate licenses, the MIT license and the
+# University of Illinois/NCSA Open Source License.  Both these licenses can be
+# found in the LICENSE file.
 
 '''
 This tool extracts information about structs and defines from the C headers.
@@ -388,7 +393,7 @@ def inspect_code(headers, cpp_opts, structs, defines):
   # Compile the program.
   show('Compiling generated code...')
   # -Oz optimizes enough to avoid warnings on code size/num locals
-  cmd = [shared.PYTHON, shared.EMCC] + cpp_opts + ['-o', js_file[1], src_file[1], '-s', 'BOOTSTRAPPING_STRUCT_INFO=1', '-s', 'WARN_ON_UNDEFINED_SYMBOLS=0', '-Oz', '--js-opts', '0', '--memory-init-file', '0', '-s', 'SINGLE_FILE=1', '-s', 'WASM=0']
+  cmd = [shared.PYTHON, shared.EMCC] + cpp_opts + ['-o', js_file[1], src_file[1], '-s', 'BOOTSTRAPPING_STRUCT_INFO=1', '-s', 'WARN_ON_UNDEFINED_SYMBOLS=0', '-Oz', '--js-opts', '0', '--memory-init-file', '0', '-s', 'SINGLE_FILE=1', '-s', 'WASM=0', '-Wno-format']
   if shared.Settings.WASM_OBJECT_FILES:
     cmd += ['-s', 'WASM_OBJECT_FILES=1']
 

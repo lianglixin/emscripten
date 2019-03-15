@@ -1,5 +1,11 @@
-#ifndef __emscripten_h__
-#define __emscripten_h__
+/*
+ * Copyright 2012 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
+#pragma once
 
 /**
  * This file contains a few useful things for compiling C/C++ code
@@ -20,8 +26,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-#include <stdio.h>
 
 #if !__EMSCRIPTEN__
 #include <SDL/SDL.h> /* for SDL_Delay in async_call */
@@ -54,7 +58,7 @@ typedef void (*em_callback_func)(void);
 typedef void (*em_arg_callback_func)(void*);
 typedef void (*em_str_callback_func)(const char *);
 
-#define EMSCRIPTEN_KEEPALIVE __attribute__((used)) __attribute__ ((visibility ("default")))
+#define EMSCRIPTEN_KEEPALIVE __attribute__((used))
 
 extern void emscripten_run_script(const char *script);
 extern int emscripten_run_script_int(const char *script);
@@ -225,6 +229,10 @@ int emscripten_get_compiler_setting(const char *name);
 
 void emscripten_debugger(void);
 
+// Forward declare FILE from musl libc headers to avoid needing to #include <stdio.h> from emscripten.h
+struct _IO_FILE;
+typedef struct _IO_FILE FILE;
+
 char *emscripten_get_preloaded_image_data(const char *path, int *w, int *h);
 char *emscripten_get_preloaded_image_data_from_FILE(FILE *file, int *w, int *h);
 
@@ -259,10 +267,6 @@ emscripten_coroutine emscripten_coroutine_create(em_arg_callback_func func, void
 int emscripten_coroutine_next(emscripten_coroutine);
 void emscripten_yield(void);
 
-
 #ifdef __cplusplus
 }
 #endif
-
-#endif // __emscripten_h__
-

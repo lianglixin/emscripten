@@ -1,3 +1,10 @@
+/*
+ * Copyright 2015 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <SDL.h>
 #include <emscripten.h>
@@ -67,8 +74,8 @@ static void render() {
   SDL_RenderClear(renderer);
   SDL_RenderPresent(renderer);
 #else
-  int width, height, isfs;
-  emscripten_get_canvas_size(&width, &height, &isfs);
+  int width, height;
+  emscripten_get_canvas_element_size("#canvas", &width, &height);
   SDL_Rect rect = { 0, 0, width, height };
   SDL_FillRect(screen, &rect, 0xff00ffff);
 #endif

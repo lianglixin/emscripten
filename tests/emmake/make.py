@@ -1,4 +1,10 @@
+# Copyright 2018 The Emscripten Authors.  All rights reserved.
+# Emscripten is available under two separate licenses, the MIT license and the
+# University of Illinois/NCSA Open Source License.  Both these licenses can be
+# found in the LICENSE file.
+
 import os
+
 
 def which(program):
   def is_exe(fpath):
@@ -15,9 +21,11 @@ def which(program):
         return exe_file
   raise Exception('that is very bad')
 
+
 def test(what):
   print(what)
   print(which(os.getenv(what, '')))
+
 
 def check_ar():
   print("Testing...")
@@ -30,5 +38,5 @@ def check_ar():
   test("RANLIB")
   print("Done.")
 
-check_ar()
 
+check_ar()

@@ -1,5 +1,12 @@
+// Copyright 2017 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 mergeInto(LibraryManager.library, {
-  $PIPEFS__postset: '__ATINIT__.push(function() { PIPEFS.root = FS.mount(PIPEFS, {}, null); });',
+  $PIPEFS__postset: function() {
+    addAtInit('PIPEFS.root = FS.mount(PIPEFS, {}, null);');
+  },
   $PIPEFS__deps: ['$FS'],
   $PIPEFS: {
     BUCKET_BUFFER_SIZE: 1024 * 8, // 8KiB Buffer

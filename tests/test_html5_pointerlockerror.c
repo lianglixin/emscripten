@@ -1,3 +1,10 @@
+/*
+ * Copyright 2016 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <emscripten.h>
 #include <string.h>
@@ -77,14 +84,14 @@ int main()
   printf("Reject the pointer lock request after clicking on canvas.\n");
 
   // Make the canvas area stand out from the background.
-  emscripten_set_canvas_size(400, 300);
+  emscripten_set_canvas_element_size( "#canvas", 400, 300 );
   EM_ASM(Module['canvas'].style.backgroundColor = 'black';);
 
-  EMSCRIPTEN_RESULT ret = emscripten_set_click_callback(0, 0, 1, click_callback);
+  EMSCRIPTEN_RESULT ret = emscripten_set_click_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, 0, 1, click_callback);
   TEST_RESULT(emscripten_set_click_callback);
-  ret = emscripten_set_pointerlockchange_callback("#window", 0, 1, pointerlockchange_callback);
+  ret = emscripten_set_pointerlockchange_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, 0, 1, pointerlockchange_callback);
   TEST_RESULT(emscripten_set_pointerlockchange_callback);
-  ret = emscripten_set_pointerlockerror_callback("#window", 0, 1, pointerlockerror_callback);
+  ret = emscripten_set_pointerlockerror_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, 0, 1, pointerlockerror_callback);
   TEST_RESULT(emscripten_set_pointerlockerror_callback);
 
   /* For the events to function, one must either call emscripten_set_main_loop or enable Module.noExitRuntime by some other means. 

@@ -1,3 +1,8 @@
+// Copyright 2014 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+//
 // Async support
 //
 // Two experiments in async support: ASYNCIFY, and EMTERPRETIFY_ASYNC
@@ -93,7 +98,7 @@ mergeInto(LibraryManager.library, {
     //  just undo a recent emscripten_alloc_async_context
     ctx = ctx|0;
 #if ASSERTIONS
-    assert((((___async_cur_frame + 8)|0) == (ctx|0))|0);
+    if ((((___async_cur_frame + 8)|0) != (ctx|0))|0) abort();
 #endif
     stackRestore(___async_cur_frame | 0);
     ___async_cur_frame = {{{ makeGetValueAsm('___async_cur_frame', 0, 'i32') }}};
@@ -193,8 +198,8 @@ mergeInto(LibraryManager.library, {
 
   emscripten_wget__deps: ['emscripten_async_resume', '$PATH', '$Browser'],
   emscripten_wget: function(url, file) {
-    var _url = Pointer_stringify(url);
-    var _file = Pointer_stringify(file);
+    var _url = UTF8ToString(url);
+    var _file = UTF8ToString(file);
     _file = PATH.resolve(FS.cwd(), _file);
     Module['setAsync']();
     Module['noExitRuntime'] = true;
@@ -404,8 +409,8 @@ mergeInto(LibraryManager.library, {
   emscripten_wget__deps: ['$EmterpreterAsync', '$PATH', '$FS', '$Browser'],
   emscripten_wget: function(url, file) {
     EmterpreterAsync.handle(function(resume) {
-      var _url = Pointer_stringify(url);
-      var _file = Pointer_stringify(file);
+      var _url = UTF8ToString(url);
+      var _file = UTF8ToString(file);
       _file = PATH.resolve(FS.cwd(), _file);
       var destinationDirectory = PATH.dirname(_file);
       FS.createPreloadedFile(
@@ -427,7 +432,7 @@ mergeInto(LibraryManager.library, {
   emscripten_wget_data__deps: ['$EmterpreterAsync', '$Browser'],
   emscripten_wget_data: function(url, pbuffer, pnum, perror) {
     EmterpreterAsync.handle(function(resume) {
-      Browser.asyncLoad(Pointer_stringify(url), function(byteArray) {
+      Browser.asyncLoad(UTF8ToString(url), function(byteArray) {
         resume(function() {
           // can only allocate the buffer after the resume, not during an asyncing
           var buffer = _malloc(byteArray.length); // must be freed by caller!

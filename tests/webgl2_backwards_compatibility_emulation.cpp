@@ -1,3 +1,8 @@
+// Copyright 2017 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 
@@ -18,7 +23,7 @@ int main()
 
   int result = 0;
 
-  EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_create_context(0, &attrs);
+  EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_create_context("#canvas", &attrs);
   assert(context);
   EMSCRIPTEN_RESULT res = emscripten_webgl_make_context_current(context);
   assert(res == EMSCRIPTEN_RESULT_SUCCESS);

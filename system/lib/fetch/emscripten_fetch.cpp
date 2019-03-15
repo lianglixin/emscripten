@@ -1,3 +1,8 @@
+// Copyright 2016 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <memory.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,6 +11,12 @@
 #include <emscripten/threading.h>
 #include <emscripten/emscripten.h>
 #include <math.h>
+#include <bits/errno.h>
+
+extern "C" {
+
+// Uncomment the following and clear the cache with emcc --clear-cache to rebuild this file to enable internal debugging.
+// #define FETCH_DEBUG
 
 struct __emscripten_fetch_queue
 {
@@ -39,8 +50,10 @@ void emscripten_proxy_fetch(emscripten_fetch_t *fetch)
 	__emscripten_fetch_queue *queue = _emscripten_get_fetch_queue();
 //	TODO handle case when queue->numQueuedItems >= queue->queueSize
 	queue->queuedOperations[queue->numQueuedItems++] = fetch;
+#ifdef FETCH_DEBUG
 	EM_ASM(console.log('Queued fetch to fetch-worker to process. There are now ' + $0 + ' operations in the queue.'),
 		queue->numQueuedItems);
+#endif
 	// TODO: mutex unlock
 }
 
@@ -56,14 +69,16 @@ emscripten_fetch_t *emscripten_fetch(emscripten_fetch_attr_t *fetch_attr, const 
 	if (!url) return 0;
 
 	const bool synchronous = (fetch_attr->attributes & EMSCRIPTEN_FETCH_SYNCHRONOUS) != 0;
-	const bool readFromIndexedDB = (fetch_attr->attributes & (EMSCRIPTEN_FETCH_APPEND | EMSCRIPTEN_FETCH_NO_DOWNLOAD)) != 0;
+	const bool readFromIndexedDB = (fetch_attr->attributes & (EMSCRIPTEN_FETCH_APPEND | EMSCRIPTEN_FETCH_NO_DOWNLOAD)) != 0 || ((fetch_attr->attributes & EMSCRIPTEN_FETCH_REPLACE) == 0);
 	const bool writeToIndexedDB = (fetch_attr->attributes & EMSCRIPTEN_FETCH_PERSIST_FILE) != 0 || !strncmp(fetch_attr->requestMethod, "EM_IDB_", strlen("EM_IDB_"));
 	const bool performXhr = (fetch_attr->attributes & EMSCRIPTEN_FETCH_NO_DOWNLOAD) == 0;
 	const bool isMainBrowserThread = emscripten_is_main_browser_thread() != 0;
 	if (isMainBrowserThread && synchronous && (performXhr || readFromIndexedDB || writeToIndexedDB))
 	{
-		EM_ASM(err('emscripten_fetch("' + Pointer_stringify($0) + '") failed! Synchronous blocking XHRs and IndexedDB operations are not supported on the main browser thread. Try dropping the EMSCRIPTEN_FETCH_SYNCHRONOUS flag, or run with the linker flag --proxy-to-worker to decouple main C runtime thread from the main browser thread.'), 
+#ifdef FETCH_DEBUG
+		EM_ASM(err('emscripten_fetch("' + UTF8ToString($0) + '") failed! Synchronous blocking XHRs and IndexedDB operations are not supported on the main browser thread. Try dropping the EMSCRIPTEN_FETCH_SYNCHRONOUS flag, or run with the linker flag --proxy-to-worker to decouple main C runtime thread from the main browser thread.'), 
 			url);
+#endif
 		return 0;
 	}
 
@@ -157,24 +172,40 @@ EMSCRIPTEN_RESULT emscripten_fetch_wait(emscripten_fetch_t *fetch, double timeou
 	uint32_t proxyState = emscripten_atomic_load_u32(&fetch->__proxyState);
 	if (proxyState == 2) return EMSCRIPTEN_RESULT_SUCCESS; // already finished.
 	if (proxyState != 1) return EMSCRIPTEN_RESULT_INVALID_PARAM; // the fetch should be ongoing?
-// #ifdef FETCH_DEBUG
+#ifdef FETCH_DEBUG
 	EM_ASM(console.log('fetch: emscripten_fetch_wait..'));
-// #endif
-	// TODO: timeoutMsecs is currently ignored. Return EMSCRIPTEN_RESULT_TIMED_OUT on timeout.
+#endif
+	if (timeoutMsecs <= 0) return EMSCRIPTEN_RESULT_TIMED_OUT;
 	while(proxyState == 1/*sent to proxy worker*/)
 	{
-		emscripten_futex_wait(&fetch->__proxyState, proxyState, 100 /*TODO HACK:Sleep sometimes doesn't wake up?*/);//timeoutMsecs);
-		proxyState = emscripten_atomic_load_u32(&fetch->__proxyState);
+		if (!emscripten_is_main_browser_thread())
+		{
+			int ret = emscripten_futex_wait(&fetch->__proxyState, proxyState, timeoutMsecs);
+			if (ret == -ETIMEDOUT) return EMSCRIPTEN_RESULT_TIMED_OUT;
+			proxyState = emscripten_atomic_load_u32(&fetch->__proxyState);
+		}
+		else 
+		{
+			EM_ASM({ console.error('fetch: emscripten_fetch_wait failed: main thread cannot block to wait for long periods of time! Migrate the application to run in a worker to perform synchronous file IO, or switch to using asynchronous IO.') });
+			return EMSCRIPTEN_RESULT_FAILED;
+		}
 	}
-// #ifdef FETCH_DEBUG
+#ifdef FETCH_DEBUG
 	EM_ASM(console.log('fetch: emscripten_fetch_wait done..'));
-// #endif
+#endif
 
 	if (proxyState == 2) return EMSCRIPTEN_RESULT_SUCCESS;
 	else return EMSCRIPTEN_RESULT_FAILED;
 #else
-	EM_ASM(console.error('fetch: emscripten_fetch_wait is not available when building without pthreads!'));
-	return EMSCRIPTEN_RESULT_FAILED;
+	if (fetch->readyState >= 4/*XMLHttpRequest.readyState.DONE*/) return EMSCRIPTEN_RESULT_SUCCESS; // already finished.
+	if (timeoutMsecs == 0) return EMSCRIPTEN_RESULT_TIMED_OUT/*Main thread testing completion with sleep=0msecs*/;
+	else
+	{
+#ifdef FETCH_DEBUG
+		EM_ASM(console.error('fetch: emscripten_fetch_wait() cannot stop to wait when building without pthreads!'));
+#endif
+		return EMSCRIPTEN_RESULT_FAILED/*Main thread cannot block to wait*/;
+	}
 #endif
 }
 
@@ -219,3 +250,5 @@ static void fetch_free(emscripten_fetch_t *fetch)
 	free((void*)fetch->__attributes.overriddenMimeType);
 	free(fetch);
 }
+
+} // extern "C"

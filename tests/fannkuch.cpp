@@ -1,4 +1,9 @@
 /*
+ * Copyright 2010 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ *
  * The Computer Language Benchmarks Game
  * http://shootout.alioth.debian.org/
  *
@@ -144,9 +149,7 @@ fannkuch(int n)
    return maxflips;
 }
 
-int
-main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
    int n = argc > 1 ? atoi(argv[1]) : 0;
 
    if (n < 1) {

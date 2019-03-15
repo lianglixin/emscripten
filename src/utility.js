@@ -1,3 +1,8 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 //"use strict";
 
 // General JS utilities - things that might be useful in any JS project.
@@ -172,41 +177,6 @@ function splitter(array, filter) {
   var splitOut = array.filter(filter);
   var leftIn = array.filter(function(x) { return !filter(x) });
   return { leftIn: leftIn, splitOut: splitOut };
-}
-
-function dcheck(tag) {
-  return DEBUG_TAGS_SHOWING.indexOf(arguments[0]) != -1;
-}
-var DPRINT_INDENT = '';
-function dprint_indent() {
-  DPRINT_INDENT += '   ';
-}
-function dprint_unindent() {
-  DPRINT_INDENT = DPRINT_INDENT.substr(3);
-}
-
-function dprint() {
-  var text;
-  if (arguments[1]) {
-    if (!dcheck(arguments[0])) return;
-    text = arguments[1];
-  } else {
-    text = arguments[0];
-  }
-  if (typeof text === 'function') {
-    text = text(); // Allows deferred calculation, so dprints don't slow us down when not needed
-  }
-  text = DPRINT_INDENT + '// ' + text;
-  printErr(text);
-}
-
-var _PROF_ORIGIN = Date.now();
-var _PROF_TIME = _PROF_ORIGIN;
-function PROF(pass) {
-  if (!pass) {
-    dprint("Profiling: " + ((Date.now() - _PROF_TIME)/1000) + ' seconds, total: ' + ((Date.now() - _PROF_ORIGIN)/1000));
-  }
-  PROF_TIME = Date.now();
 }
 
 // Usage: arrayOfArrays.reduce(concatenator, []);

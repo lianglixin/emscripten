@@ -1,3 +1,8 @@
+// Copyright 2012 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <string>
 #include <malloc.h>
 #include <functional>
@@ -159,8 +164,9 @@ std::wstring get_literal_wstring() {
 }
 
 void force_memory_growth() {
-    auto heapu8 = val::global("Module")["HEAPU8"];
-    delete [] new char[heapu8["byteLength"].as<size_t>() + 1];
+    val module = val::global("Module");
+    std::size_t heap_size = module["HEAPU8"]["byteLength"].as<size_t>();
+    module.call<void>("_free", module.call<val>("_malloc", heap_size + 1));
 }
 
 std::string emval_test_take_and_return_const_char_star(const char* str) {
@@ -1730,7 +1736,7 @@ EMSCRIPTEN_BINDINGS(tests) {
         .element(&TupleVector::x)
         .element(&Vector::getY, &Vector::setY)
         .element(&readVectorZ, &writeVectorZ)
-        .element(index<3>())
+        .element(emscripten::index<3>())
         ;
 
     function("emval_test_return_TupleVector", &emval_test_return_TupleVector);
@@ -1746,7 +1752,7 @@ EMSCRIPTEN_BINDINGS(tests) {
         .field("x", &StructVector::x)
         .field("y", &Vector::getY, &Vector::setY)
         .field("z", &readVectorZ, &writeVectorZ)
-        .field("w", index<3>())
+        .field("w", emscripten::index<3>())
         ;
 
     function("emval_test_return_StructVector", &emval_test_return_StructVector);
@@ -1760,12 +1766,12 @@ EMSCRIPTEN_BINDINGS(tests) {
 
 
     value_array<std::array<int, 2>>("array_int_2")
-        .element(index<0>())
-        .element(index<1>())
+        .element(emscripten::index<0>())
+        .element(emscripten::index<1>())
         ;
     value_array<std::array<NestedStruct, 2>>("array_NestedStruct_2")
-        .element(index<0>())
-        .element(index<1>())
+        .element(emscripten::index<0>())
+        .element(emscripten::index<1>())
         ;
     value_object<NestedStruct>("NestedStruct")
         .field("x", &NestedStruct::x)
@@ -2721,10 +2727,21 @@ val construct_with_ints_and_float(val factory) {
     return factory.new_(65537, 4.0f, 65538);
 }
 
+val construct_with_arguments_before_and_after_memory_growth() {
+    auto out = val::array();
+    out.set(0, val::global("Uint8Array").new_(5));
+    force_memory_growth();
+    out.set(1, val::global("Uint8Array").new_(5));
+    return out;
+}
+
 EMSCRIPTEN_BINDINGS(val_new_) {
     function("construct_with_6_arguments", &construct_with_6);
     function("construct_with_memory_view", &construct_with_memory_view);
     function("construct_with_ints_and_float", &construct_with_ints_and_float);
+    function(
+            "construct_with_arguments_before_and_after_memory_growth",
+            &construct_with_arguments_before_and_after_memory_growth);
 }
 
 template <typename T>

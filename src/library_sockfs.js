@@ -1,5 +1,12 @@
+// Copyright 2013 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 mergeInto(LibraryManager.library, {
-  $SOCKFS__postset: '__ATINIT__.push(function() { SOCKFS.root = FS.mount(SOCKFS, {}, null); });',
+  $SOCKFS__postset: function() {
+    addAtInit('SOCKFS.root = FS.mount(SOCKFS, {}, null);');
+  },
   $SOCKFS__deps: ['$FS'],
   $SOCKFS: {
     mount: function(mount) {
@@ -205,15 +212,17 @@ mergeInto(LibraryManager.library, {
 #endif
             // If node we use the ws library.
             var WebSocketConstructor;
-            if (ENVIRONMENT_IS_NODE) {
 #if ENVIRONMENT_MAY_BE_NODE
+            if (ENVIRONMENT_IS_NODE) {
               WebSocketConstructor = require('ws');
-#endif ENVIRONMENT_MAY_BE_NODE
-            } else if (ENVIRONMENT_IS_WEB) {
+            } else
+#endif // ENVIRONMENT_MAY_BE_NODE
 #if ENVIRONMENT_MAY_BE_WEB
+            if (ENVIRONMENT_IS_WEB) {
               WebSocketConstructor = window['WebSocket'];
+            } else
 #endif // ENVIRONMENT_MAY_BE_WEB
-            } else {
+            {
               WebSocketConstructor = WebSocket;
             }
             ws = new WebSocketConstructor(url, opts);
@@ -722,10 +731,10 @@ mergeInto(LibraryManager.library, {
         if (event === 'error') {
           var sp = stackSave();
           var msg = allocate(intArrayFromString(data[2]), 'i8', ALLOC_STACK);
-          Module['dynCall_viiii'](callback, data[0], data[1], msg, userData);
+          {{{ makeDynCall('viiii') }}}(callback, data[0], data[1], msg, userData);
           stackRestore(sp);
         } else {
-          Module['dynCall_vii'](callback, data, userData);
+          {{{ makeDynCall('vii') }}}(callback, data, userData);
         }
       } catch (e) {
         if (e instanceof ExitStatus) {

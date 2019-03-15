@@ -2,6 +2,7 @@ module({
     Emscripten: '../../../../build/embind_test.js',
 }, function(imports) {
     /*jshint sub:true */
+    /* global console */
     var cm = imports.Emscripten;
 
     var CheckForLeaks = fixture("check for leaks", function() {
@@ -161,7 +162,7 @@ module({
         });
 
         test("setting and getting property on unrelated class throws error", function() {
-            var className = Module['NO_DYNAMIC_EXECUTION'] ? '' : 'HasTwoBases';
+            var className = cm['DYNAMIC_EXECUTION'] ? 'HasTwoBases' : '';
             var a = new cm.HasTwoBases;
             var e = assert.throws(cm.BindingError, function() {
                 Object.getOwnPropertyDescriptor(cm.HeldBySmartPtr.prototype, 'i').set.call(a, 10);
@@ -378,13 +379,14 @@ module({
     });
 
     BaseFixture.extend("string", function() {
-        var stdStringIsUTF8 = (Module['EMBIND_STD_STRING_IS_UTF8'] == true);
+        var stdStringIsUTF8 = (cm['EMBIND_STD_STRING_IS_UTF8'] === true);
 
         test("non-ascii strings", function() {
 
+            var expected = '';
             if(stdStringIsUTF8) {
                 //ASCII
-                var expected = 'aei';
+                expected = 'aei';
                 //Latin-1 Supplement
                 expected += '\u00E1\u00E9\u00ED';
                 //Greek
@@ -396,7 +398,6 @@ module({
                 //Euro sign
                 expected += '\u20AC';
             } else {
-                var expected = '';
                 for (var i = 0; i < 128; ++i) {
                     expected += String.fromCharCode(128 + i);
                 }
@@ -439,6 +440,12 @@ module({
         test("can pass Uint8Array to std::basic_string<unsigned char>", function() {
             var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(new Uint8Array([65, 66, 67, 68]));
             assert.equal('ABCD', e);
+        });
+
+        test("can pass long string to std::basic_string<unsigned char>", function() {
+            var s = 'this string is long enough to exceed the short string optimization';
+            var e = cm.emval_test_take_and_return_std_basic_string_unsigned_char(s);
+            assert.equal(s, e);
         });
 
         test("can pass Uint8ClampedArray to std::basic_string<unsigned char>", function() {
@@ -1064,6 +1071,18 @@ module({
            map.delete();
        });
 
+       test("std::map can get keys", function() {
+           var map = cm.embind_test_get_string_int_map();
+
+           var keys = map.keys();
+           assert.equal(map.size(), keys.size());
+           assert.equal("one", keys.get(0));
+           assert.equal("two", keys.get(1));
+           keys.delete();
+
+           map.delete();
+       });
+
        test("std::map can set keys and values", function() {
            var map = cm.embind_test_get_string_int_map();
 
@@ -1585,7 +1604,7 @@ module({
 
         test("smart pointer object has correct constructor name", function() {
             var e = new cm.HeldBySmartPtr(10, "foo");
-            var expectedName = Module['NO_DYNAMIC_EXECUTION'] ? "" : "HeldBySmartPtr";
+            var expectedName = cm['DYNAMIC_EXECUTION'] ? "HeldBySmartPtr" : "";
             assert.equal(expectedName, e.constructor.name);
             e.delete();
         });
@@ -2329,7 +2348,7 @@ module({
     });
 
     BaseFixture.extend("function names", function() {
-        if (Module['NO_DYNAMIC_EXECUTION']) {
+        if (!cm['DYNAMIC_EXECUTION']) {
           assert.equal('', cm.ValHolder.name);
           assert.equal('', cm.ValHolder.prototype.setVal.name);
           assert.equal('', cm.ValHolder.makeConst.name);
@@ -2603,6 +2622,14 @@ module({
             assert.equal(4.0, instance.b);
             assert.equal(65538, instance.c);
         });
+
+        if (cm.isMemoryGrowthEnabled) {
+            test("before and after memory growth", function() {
+                var array = cm.construct_with_arguments_before_and_after_memory_growth();
+                assert.equal(array[0].byteLength, 5);
+                assert.equal(array[0].byteLength, array[1].byteLength);
+            });
+        }
     });
 
     BaseFixture.extend("intrusive pointers", function() {

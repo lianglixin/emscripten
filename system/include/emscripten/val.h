@@ -1,8 +1,15 @@
+/*
+ * Copyright 2012 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #pragma once
 
 #if __cplusplus < 201103L
 #error Including <emscripten/val.h> requires building with -std=c++11 or newer!
-#else
+#endif
 
 #include <stdint.h> // uintptr_t
 #include <emscripten/wire.h>
@@ -63,6 +70,7 @@ namespace emscripten {
             bool _emval_strictly_equals(EM_VAL first, EM_VAL second);
             bool _emval_greater_than(EM_VAL first, EM_VAL second);
             bool _emval_less_than(EM_VAL first, EM_VAL second);
+            bool _emval_not(EM_VAL object);
 
             EM_VAL _emval_call(
                 EM_VAL value,
@@ -90,6 +98,7 @@ namespace emscripten {
             bool _emval_instanceof(EM_VAL object, EM_VAL constructor);
             bool _emval_in(EM_VAL item, EM_VAL object);
             bool _emval_delete(EM_VAL object, EM_VAL property);
+            bool _emval_throw(EM_VAL object);
         }
 
         template<const char* address>
@@ -275,7 +284,7 @@ namespace emscripten {
     class val {
     public:
         // missing operators:
-        // * ! ~ - + ++ --
+        // * ~ - + ++ --
         // * * / %
         // * + -
         // * << >> >>>
@@ -288,12 +297,18 @@ namespace emscripten {
             return val(internal::_emval_new_array());
         }
 
-        template<typename T>
-        static val array(const std::vector<T> vec) {
+        template<typename Iter>
+        static val array(Iter begin, Iter end) {
             val new_array = array();
-            for(auto it = vec.begin(); it != vec.end(); it++)
+            for (auto it = begin; it != end; ++it) {
                 new_array.call<void>("push", *it);
+            }
             return new_array;
+        }
+
+        template<typename T>
+        static val array(const std::vector<T>& vec) {
+            return array(vec.begin(), vec.end());
         }
 
         static val object() {
@@ -419,16 +434,20 @@ namespace emscripten {
             return internal::_emval_greater_than(handle, v.handle);
         }
 
-        bool operator>= (const val& v) const {
+        bool operator>=(const val& v) const {
             return (*this > v) || (*this == v);
         }
 
-        bool operator< (const val& v) const {
+        bool operator<(const val& v) const {
             return internal::_emval_less_than(handle, v.handle);
         }
 
-        bool operator<= (const val& v) const {
+        bool operator<=(const val& v) const {
             return (*this < v) || (*this == v);
+        }
+
+        bool operator!() const {
+            return internal::_emval_not(handle);
         }
 
         template<typename... Args>
@@ -504,6 +523,10 @@ namespace emscripten {
             return internal::_emval_delete(handle, val(property).handle);
         }
 
+        void throw_() const {
+            internal::_emval_throw(handle);
+        }
+
     private:
         // takes ownership, assumes handle already incref'd
         explicit val(internal::EM_VAL handle)
@@ -562,5 +585,3 @@ namespace emscripten {
         return rv;
     };
 }
-
-#endif // ~C++11 version check

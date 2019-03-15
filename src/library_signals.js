@@ -1,3 +1,8 @@
+// Copyright 2014 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 // 'use strict'
 var funs = {
   _sigalrm_handler: 0,
@@ -100,7 +105,7 @@ var funs = {
   alarm__deps: ['_sigalrm_handler'],
   alarm: function(seconds) {
     setTimeout(function() {
-      if (__sigalrm_handler) Module['dynCall_vi'](__sigalrm_handler, 0);
+      if (__sigalrm_handler) {{{ makeDynCall('vi') }}}(__sigalrm_handler, 0);
     }, seconds*1000);
   },
   ualarm: function() {
@@ -124,6 +129,7 @@ var funs = {
     ___setErrNo(ERRNO_CODES.EINTR);
     return -1;
   },
+#if SUPPORT_LONGJMP
 #if ASSERTIONS
   siglongjmp__deps: ['longjmp'],
   siglongjmp: function(env, value) {
@@ -135,8 +141,11 @@ var funs = {
     _longjmp(env, value);
   },
 #else
+  siglongjmp__sig: 'vii',
   siglongjmp: 'longjmp',
 #endif
+#endif
+
   sigpending: function(set) {
     {{{ makeSetValue('set', 0, 0, 'i32') }}};
     return 0;

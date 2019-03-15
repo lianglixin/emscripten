@@ -1,3 +1,10 @@
+/*
+ * Copyright 2016 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +23,7 @@ int main(int argc, char **argv)
 
   printf("*pre: %s,%.3f*\n", buf1, buf2[0]);
 
-  int totalMemory = emscripten_run_script_int("TOTAL_MEMORY");
+  int totalMemory = emscripten_run_script_int("HEAP8.length");
   int chunk = 1024*1024;
   char *buf3;
   for (int i = 0; i < (totalMemory/chunk)+1; i++) {

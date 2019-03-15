@@ -1,7 +1,11 @@
-/* -*- Mode: c++; indent-tabs-mode: nil; tab-width: 40; c-basic-offset: 4 -*- */
+/*
+ * Copyright 2015 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
 
-#ifndef __emscripten_vr_h__
-#define __emscripten_vr_h__
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -60,7 +64,7 @@ typedef struct VRDisplayCapabilities {
     int32_t hasPosition;
     int32_t hasExternalDisplay;
     int32_t canPresent;
-    unsigned long maxLayers;
+    uint32_t maxLayers;
 } VRDisplayCapabilities;
 
 #define VR_LAYER_DEFAULT_LEFT_BOUNDS {0.0f, 0.0f, 0.5f, 1.0f}
@@ -103,8 +107,8 @@ typedef struct VRPose {
 typedef struct VREyeParameters {
     VRVector3 offset;
 
-    unsigned long renderWidth;
-    unsigned long renderHeight;
+    uint32_t renderWidth;
+    uint32_t renderHeight;
 } VREyeParameters;
 
 typedef struct VRFrameData {
@@ -146,6 +150,4 @@ extern bool emscripten_vr_display_presenting(VRDisplayHandle handle);
 
 #ifdef __cplusplus
 } // ~extern "C"
-#endif
-
 #endif

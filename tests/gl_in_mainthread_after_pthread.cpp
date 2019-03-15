@@ -1,3 +1,8 @@
+// Copyright 2016 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <stdio.h>
 #include <string.h>
 #include <pthread.h>
@@ -22,7 +27,7 @@ void *ThreadMain(void *arg)
   EmscriptenWebGLContextAttributes attr;
   emscripten_webgl_init_context_attributes(&attr);
   attr.explicitSwapControl = EM_TRUE;
-  ctx = emscripten_webgl_create_context(0, &attr);
+  ctx = emscripten_webgl_create_context("#canvas", &attr);
   emscripten_webgl_make_context_current(ctx);
 
   double color = 0;
@@ -98,7 +103,7 @@ void PollThreadExit(void *)
 #ifdef TEST_MAIN_THREAD_EXPLICIT_COMMIT
     attr.explicitSwapControl = EM_TRUE;
 #endif
-    ctx = emscripten_webgl_create_context(0, &attr);
+    ctx = emscripten_webgl_create_context("#canvas", &attr);
     emscripten_webgl_make_context_current(ctx);
     printf("Main thread rendering. You should see the WebGL canvas fade from black to green.\n");
     emscripten_set_main_loop(MainThreadRender, 0, 0);

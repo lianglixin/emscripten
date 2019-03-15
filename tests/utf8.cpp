@@ -1,3 +1,8 @@
+// Copyright 2015 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <stdio.h>
 #include <string.h>
 #include <wchar.h>
@@ -7,6 +12,12 @@
 
 // This code tests that Unicode std::wstrings can be marshalled between C++ and JS.
 int main() {
+  const char latin1String[] = "\x26\xA0\xF7";
+  EM_ASM({
+    var str = Module.AsciiToString($0);
+    assert(str === "\\x26\\xA0\\xF7");
+  }, latin1String);
+
   const char asciiString[] = "Hello world!";
   char asciiString2[128] = {};
   EM_ASM({

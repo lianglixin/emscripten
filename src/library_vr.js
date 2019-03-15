@@ -1,3 +1,8 @@
+// Copyright 2015 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 var LibraryWebVR = {
   $WebVR: {
     EYE_LEFT: {{{ cDefine('VR_EYE_LEFT') }}},
@@ -127,7 +132,7 @@ var LibraryWebVR = {
     {{{ makeSetValue('capsPtr', C_STRUCTS.VRDisplayCapabilities.hasExternalDisplay, 'caps.hasExternalDisplay ? 1 : 0', 'i32') }}};
     {{{ makeSetValue('capsPtr', C_STRUCTS.VRDisplayCapabilities.canPresent, 'caps.canPresent ? 1 : 0', 'i32') }}};
 
-    {{{ makeSetValue('capsPtr', C_STRUCTS.VRDisplayCapabilities.maxLayers, 'caps.maxLayers', 'i64') }}};
+    {{{ makeSetValue('capsPtr', C_STRUCTS.VRDisplayCapabilities.maxLayers, 'caps.maxLayers', 'i32') }}};
 
     return 1;
   },
@@ -144,8 +149,8 @@ var LibraryWebVR = {
     {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.offset.y, 'params.offset[1]', 'float') }}};
     {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.offset.z, 'params.offset[2]', 'float') }}};
 
-    {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.renderWidth, 'params.renderWidth', 'i64') }}};
-    {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.renderHeight, 'params.renderHeight', 'i64') }}};
+    {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.renderWidth, 'params.renderWidth', 'i32') }}};
+    {{{ makeSetValue('eyeParamsPtr', C_STRUCTS.VREyeParameters.renderHeight, 'params.renderHeight', 'i32') }}};
 
     return 1;
   },
@@ -190,7 +195,7 @@ var LibraryWebVR = {
         /* Prevent scheduler being called twice when loop is changed */
         display.mainLoop.running = true;
 
-#if USES_GL_EMULATION
+#if FULL_ES2 || LEGACY_GL_EMULATION
         GL.newRenderingFrameStarted();
 #endif
 

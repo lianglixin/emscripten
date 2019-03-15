@@ -1,3 +1,8 @@
+// Copyright 2015 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <pthread.h>
 #include <sys/types.h>
 #include <stdio.h>
@@ -26,7 +31,7 @@ static void *thread_start(void *arg)
 
 int main()
 {
-  // Test existence of nanosleep(), https://github.com/kripken/emscripten/issues/4578
+  // Test existence of nanosleep(), https://github.com/emscripten-core/emscripten/issues/4578
   struct timespec ts = { 1, 0 };
   nanosleep(&ts, 0);
 

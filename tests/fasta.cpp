@@ -1,3 +1,8 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 /* The Computer Language Benchmarks Game
    http://shootout.alioth.debian.org/
    contributed by Andrew Moon
@@ -183,7 +188,7 @@ static const char alu[] =
    "CCGGGAGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTG"
    "CACTCCAGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA";
 
-int main( int argc, const char *argv[] ) {
+int main(int argc, char **argv) {
    const size_t n = ( argc > 1 ) ? atoi( argv[1] ) : 512;
 
    Repeater(alu)

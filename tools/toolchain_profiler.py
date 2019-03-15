@@ -1,4 +1,13 @@
-import subprocess, os, time, sys, tempfile
+# Copyright 2016 The Emscripten Authors.  All rights reserved.
+# Emscripten is available under two separate licenses, the MIT license and the
+# University of Illinois/NCSA Open Source License.  Both these licenses can be
+# found in the LICENSE file.
+
+import subprocess
+import os
+import time
+import sys
+import tempfile
 
 sys.path.insert(1, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -22,9 +31,9 @@ if EM_PROFILE_TOOLCHAIN:
     ToolchainProfiler.record_subprocess_spawn(pid, cmd)
     try:
       returncode = original_subprocess_call(cmd, *args, **kw)
-    except Exception as e:
+    except Exception:
       ToolchainProfiler.record_subprocess_finish(pid, 1)
-      raise e
+      raise
     ToolchainProfiler.record_subprocess_finish(pid, returncode)
     return returncode
 
@@ -35,7 +44,7 @@ if EM_PROFILE_TOOLCHAIN:
       ret = original_subprocess_check_call(cmd, *args, **kw)
     except Exception as e:
       ToolchainProfiler.record_subprocess_finish(pid, e.returncode)
-      raise e
+      raise
     ToolchainProfiler.record_subprocess_finish(pid, 0)
     return ret
 
@@ -46,7 +55,7 @@ if EM_PROFILE_TOOLCHAIN:
       ret = original_subprocess_check_output(cmd, *args, **kw)
     except Exception as e:
       ToolchainProfiler.record_subprocess_finish(pid, e.returncode)
-      raise e
+      raise
     ToolchainProfiler.record_subprocess_finish(pid, 0)
     return ret
 
@@ -111,7 +120,8 @@ if EM_PROFILE_TOOLCHAIN:
       except:
         pass
 
-      if ToolchainProfiler.process_start_recorded: return
+      if ToolchainProfiler.process_start_recorded:
+        return
       ToolchainProfiler.process_start_recorded = True
       ToolchainProfiler.block_stack = []
 
@@ -121,7 +131,8 @@ if EM_PROFILE_TOOLCHAIN:
 
     @staticmethod
     def record_process_exit(returncode):
-      if ToolchainProfiler.process_exit_recorded: return
+      if ToolchainProfiler.process_exit_recorded:
+        return
       ToolchainProfiler.process_exit_recorded = True
 
       ToolchainProfiler.exit_all_blocks()
@@ -226,8 +237,10 @@ else:
     class ProfileBlock(object):
       def __init__(self, block_name):
         pass
+
       def __enter__(self):
         pass
+
       def __exit__(self, type, value, traceback):
         pass
 

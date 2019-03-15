@@ -1,3 +1,8 @@
+// Copyright 2015 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
@@ -41,9 +46,9 @@ int main()
 {
   EmscriptenWebGLContextAttributes attrs;
   emscripten_webgl_init_context_attributes(&attrs);
-  EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_create_context(0, &attrs);
-  emscripten_set_webglcontextlost_callback(0, 0, 0, context_lost);
-  emscripten_set_webglcontextrestored_callback(0, 0, 0, context_restored);
+  EMSCRIPTEN_WEBGL_CONTEXT_HANDLE context = emscripten_webgl_create_context("#canvas", &attrs);
+  emscripten_set_webglcontextlost_callback("#canvas", 0, 0, context_lost);
+  emscripten_set_webglcontextrestored_callback("#canvas", 0, 0, context_restored);
   // When we force a context loss, we should get an event, i.e. context_lost_desired() should get called.
   EM_ASM({
       // The GL object is accessed here in a closure unsafe manner, so this test should not be run with closure enabled.

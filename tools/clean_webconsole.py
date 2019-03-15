@@ -1,3 +1,8 @@
+# Copyright 2012 The Emscripten Authors.  All rights reserved.
+# Emscripten is available under two separate licenses, the MIT license and the
+# University of Illinois/NCSA Open Source License.  Both these licenses can be
+# found in the LICENSE file.
+
 """Removes timestamp and line info from a webgl log
 """
 
@@ -32,5 +37,5 @@ for line in lines:
   if line.startswith('['):
     line = line[15:]
   line = line.split(' @ ')[0]
-  line = re.sub('(0x[\dabcdef]+)', lambda hexx: reps[nice(hexx.group(0))] if nice(hexx.group(0)) in reps else nice(hexx.group(0)), line)
+  line = re.sub(r'(0x[\dabcdef]+)', lambda hexx: reps[nice(hexx.group(0))] if nice(hexx.group(0)) in reps else nice(hexx.group(0)), line)
   print(line)

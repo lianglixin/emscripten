@@ -1,8 +1,15 @@
+/*
+ * Copyright 2012 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #pragma once
 
 #if __cplusplus < 201103L
 #error Including <emscripten/bind.h> requires building with -std=c++11 or newer!
-#else
+#endif
 
 #include <stddef.h>
 #include <assert.h>
@@ -1524,6 +1531,17 @@ namespace emscripten {
             ) {
                 m[k] = v;
             }
+
+            static std::vector<typename MapType::key_type> keys(
+                const MapType& m
+            ) {
+              std::vector<typename MapType::key_type> keys;
+              keys.reserve(m.size());
+              for (const auto& pair : m) {
+                keys.push_back(pair.first);
+              }
+              return keys;
+            }
         };
     }
 
@@ -1536,6 +1554,7 @@ namespace emscripten {
             .function("size", &MapType::size)
             .function("get", internal::MapAccess<MapType>::get)
             .function("set", internal::MapAccess<MapType>::set)
+            .function("keys", internal::MapAccess<MapType>::keys)
             ;
     }
 
@@ -1604,5 +1623,3 @@ namespace emscripten {
         EmscriptenBindingInitializer_##name();                          \
     } EmscriptenBindingInitializer_##name##_instance;                   \
     EmscriptenBindingInitializer_##name::EmscriptenBindingInitializer_##name()
-
-#endif // ~C++11 version check

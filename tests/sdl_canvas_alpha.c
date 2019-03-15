@@ -1,9 +1,17 @@
+/*
+ * Copyright 2013 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <SDL/SDL.h>
 #include <SDL/SDL_ttf.h>
 #include <emscripten.h>
+#include <emscripten/html5.h>
 
 
 int main(int argc, char **argv) {
@@ -36,8 +44,8 @@ int main(int argc, char **argv) {
 
   SDL_LockSurface(screen);
 
-  int width, height, isFullscreen;
-  emscripten_get_canvas_size(&width, &height, &isFullscreen);
+  int width, height;
+  emscripten_get_canvas_element_size("#canvas", &width, &height);
 
   if (width != 600 && height != 450)
   {

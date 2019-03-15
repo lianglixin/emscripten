@@ -1,3 +1,8 @@
+// Copyright 2011 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 // From https://github.com/chadaustin/Web-Benchmarks/blob/master/skinning_test_no_simd.cpp
 // Modifications:
 //   1. Run for a fixed # of iterations, so the total runtime is the benchmark
@@ -169,8 +174,7 @@ void calculateVerticesAndNormals_x87(
   }
 }
 
-int main (int argc, char*argv[])
-{
+int main(int argc, char **argv) {
   int N, M;
   int arg = argc > 1 ? argv[1][0] - '0' : 3;
   switch(arg) {

@@ -1,3 +1,8 @@
+// Copyright 2010 The Emscripten Authors.  All rights reserved.
+// Emscripten is available under two separate licenses, the MIT license and the
+// University of Illinois/NCSA Open Source License.  Both these licenses can be
+// found in the LICENSE file.
+
 #if SIDE_MODULE == 0
 // The Module object: Our interface to the outside world. We import
 // and export values on it. There are various ways Module can be used:
@@ -49,7 +54,7 @@ Module['postRun'] = [];
 // Determine the runtime environment we are in. You can customize this by
 // setting the ENVIRONMENT setting at compile time (see settings.js).
 
-#if ENVIRONMENT
+#if ENVIRONMENT && ENVIRONMENT.indexOf(',') < 0
 var ENVIRONMENT_IS_WEB = {{{ ENVIRONMENT === 'web' }}};
 var ENVIRONMENT_IS_WORKER = {{{ ENVIRONMENT === 'worker' }}};
 var ENVIRONMENT_IS_NODE = {{{ ENVIRONMENT === 'node' }}};
@@ -71,23 +76,12 @@ if (Module['ENVIRONMENT']) {
 }
 #endif
 
-// Three configurations we can be running in:
-// 1) We could be the application main() thread running in the main JS UI thread. (ENVIRONMENT_IS_WORKER == false and ENVIRONMENT_IS_PTHREAD == false)
-// 2) We could be the application main() thread proxied to worker. (with Emscripten -s PROXY_TO_WORKER=1) (ENVIRONMENT_IS_WORKER == true, ENVIRONMENT_IS_PTHREAD == false)
-// 3) We could be an application pthread running in a worker. (ENVIRONMENT_IS_WORKER == true and ENVIRONMENT_IS_PTHREAD == true)
-#if USE_PTHREADS
-var ENVIRONMENT_IS_PTHREAD;
-if (!ENVIRONMENT_IS_PTHREAD) ENVIRONMENT_IS_PTHREAD = false; // ENVIRONMENT_IS_PTHREAD=true will have been preset in pthread-main.js. Make it false in the main runtime thread.
-var PthreadWorkerInit; // Collects together variables that are needed at initialization time for the web workers that host pthreads.
-if (!ENVIRONMENT_IS_PTHREAD) PthreadWorkerInit = {};
-var currentScriptUrl = (typeof document !== 'undefined' && document.currentScript) ? document.currentScript.src : undefined;
-#endif
+#include "shell_pthreads.js"
 
-#if ASSERTIONS
-assert(typeof Module['memoryInitializerPrefixURL'] === 'undefined', 'Module.memoryInitializerPrefixURL option was removed, use Module.locateFile instead');
-assert(typeof Module['pthreadMainPrefixURL'] === 'undefined', 'Module.pthreadMainPrefixURL option was removed, use Module.locateFile instead');
-assert(typeof Module['cdInitializerPrefixURL'] === 'undefined', 'Module.cdInitializerPrefixURL option was removed, use Module.locateFile instead');
-assert(typeof Module['filePackagePrefixURL'] === 'undefined', 'Module.filePackagePrefixURL option was removed, use Module.locateFile instead');
+#if USE_PTHREADS && !MODULARIZE
+// In MODULARIZE mode _scriptDir needs to be captured already at the very top of the page immediately when the page is parsed, so it is generated there
+// before the page load. In non-MODULARIZE modes generate it here.
+var _scriptDir = (typeof document !== 'undefined' && document.currentScript) ? document.currentScript.src : undefined;
 #endif
 
 // `/` should be present at the end if `scriptDirectory` is not empty
@@ -102,12 +96,12 @@ function locateFile(path) {
 
 #if ENVIRONMENT_MAY_BE_NODE
 if (ENVIRONMENT_IS_NODE) {
-  scriptDirectory = __dirname + '/';
 #if ENVIRONMENT
 #if ASSERTIONS
   if (!(typeof process === 'object' && typeof require === 'function')) throw new Error('not compiled for this environment (did you build to HTML and try to run it not on the web, or set ENVIRONMENT to something - like node - and run it someplace else - like on the web?)');
 #endif
 #endif
+  scriptDirectory = __dirname + '/';
 
   // Expose functionality in the same simple way that the shells work
   // Note that we pollute the global namespace here, otherwise we break in node
@@ -163,12 +157,7 @@ if (ENVIRONMENT_IS_NODE) {
 #endif
   // Currently node will swallow unhandled rejections, but this behavior is
   // deprecated, and in the future it will exit with error status.
-  process['on']('unhandledRejection', function(reason, p) {
-#if ASSERTIONS
-    err('node.js exiting due to unhandled promise rejection');
-#endif
-    process['exit'](1);
-  });
+  process['on']('unhandledRejection', abort);
 
   Module['quit'] = function(status) {
     process['exit'](status);
@@ -227,28 +216,26 @@ if (ENVIRONMENT_IS_SHELL) {
   }
 } else
 #endif // ENVIRONMENT_MAY_BE_SHELL
-#if ENVIRONMENT_MAY_BE_WEB_OR_WORKER
+#if ENVIRONMENT_MAY_BE_WEB || ENVIRONMENT_MAY_BE_WORKER
 if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
-  if (ENVIRONMENT_IS_WEB) {
-    if (document.currentScript) {
-      scriptDirectory = document.currentScript.src;
-    }
-  } else { // worker
+  if (ENVIRONMENT_IS_WORKER) { // Check worker, not web, since window could be polyfilled
     scriptDirectory = self.location.href;
+  } else if (document.currentScript) { // web
+    scriptDirectory = document.currentScript.src;
   }
-#if MODULARIZE
-#if MODULARIZE_INSTANCE == 0
+#if MODULARIZE && MODULARIZE_INSTANCE == 0
   // When MODULARIZE (and not _INSTANCE), this JS may be executed later, after document.currentScript
   // is gone, so we saved it, and we use it here instead of any other info.
   if (_scriptDir) {
     scriptDirectory = _scriptDir;
   }
 #endif
-#endif
   // blob urls look like blob:http://site.com/etc/etc and we cannot infer anything from them.
   // otherwise, slice off the final part of the url to find the script directory.
+  // if scriptDirectory does not contain a slash, lastIndexOf will return -1,
+  // and scriptDirectory will correctly be replaced with an empty string.
   if (scriptDirectory.indexOf('blob:') !== 0) {
-    scriptDirectory = scriptDirectory.split('/').slice(0, -1).join('/') + '/';
+    scriptDirectory = scriptDirectory.substr(0, scriptDirectory.lastIndexOf('/')+1);
   } else {
     scriptDirectory = '';
   }
@@ -324,7 +311,7 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 
   Module['setWindowTitle'] = function(title) { document.title = title };
 } else
-#endif // ENVIRONMENT_MAY_BE_WEB_OR_WORKER
+#endif // ENVIRONMENT_MAY_BE_WEB || ENVIRONMENT_MAY_BE_WORKER
 {
 #if ASSERTIONS
   throw new Error('environment detection error');
@@ -349,6 +336,17 @@ for (key in moduleOverrides) {
 // Free the object hierarchy contained in the overrides, this lets the GC
 // reclaim data used e.g. in memoryInitializerRequest, which is a large typed array.
 moduleOverrides = undefined;
+
+// perform assertions in shell.js after we set up out() and err(), as otherwise if an assertion fails it cannot print the message
+#if ASSERTIONS
+assert(typeof Module['memoryInitializerPrefixURL'] === 'undefined', 'Module.memoryInitializerPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['pthreadMainPrefixURL'] === 'undefined', 'Module.pthreadMainPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['cdInitializerPrefixURL'] === 'undefined', 'Module.cdInitializerPrefixURL option was removed, use Module.locateFile instead');
+assert(typeof Module['filePackagePrefixURL'] === 'undefined', 'Module.filePackagePrefixURL option was removed, use Module.locateFile instead');
+#if USE_PTHREADS
+assert(ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER, 'Pthreads do not work in non-browser environments yet (need Web Workers, or an alternative to them)');
+#endif // USE_PTHREADS
+#endif // ASSERTIONS
 
 {{BODY}}
 

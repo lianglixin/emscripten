@@ -1,3 +1,10 @@
+/*
+ * Copyright 2014 The Emscripten Authors.  All rights reserved.
+ * Emscripten is available under two separate licenses, the MIT license and the
+ * University of Illinois/NCSA Open Source License.  Both these licenses can be
+ * found in the LICENSE file.
+ */
+
 #include <stdio.h>
 #include <SDL2/SDL.h>
 #include <emscripten.h>
@@ -79,7 +86,7 @@ int main(int argc, char** argv) {
   SDL_RenderCopy(renderer, screenTexture, NULL, NULL);
   SDL_RenderPresent(renderer);
 
-  SDL_Quit();
+  // Don't quit - we need to reftest the canvas! SDL_Quit();
 
   return 0;
 }

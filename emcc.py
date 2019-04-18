@@ -80,7 +80,6 @@ SUPPORTED_LINKER_FLAGS = (
 
 LIB_PREFIXES = ('', 'lib')
 
-
 DEFERRED_RESPONSE_FILES = ('EMTERPRETIFY_BLACKLIST', 'EMTERPRETIFY_WHITELIST', 'EMTERPRETIFY_SYNCLIST')
 
 # Mapping of emcc opt levels to llvm opt levels. We use llvm opt level 3 in emcc
@@ -615,20 +614,17 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
       compiler = shared.to_cc(compiler)
 
     def filter_emscripten_options(argv):
-      idx = 0
       skip_next = False
-      for el in argv:
+      for idx, arg in enumerate(argv):
         if skip_next:
           skip_next = False
-          idx += 1
           continue
-        if not use_js and el == '-s' and is_minus_s_for_emcc(argv, idx): # skip -s X=Y if not using js for configure
+        if not use_js and arg == '-s' and is_minus_s_for_emcc(argv, idx):
+          # skip -s X=Y if not using js for configure
           skip_next = True
-        if not use_js and el == '--tracing':
-          pass
-        else:
-          yield el
-        idx += 1
+          continue
+        if use_js or arg != '--tracing':
+          yield arg
 
     if compiler in (shared.EMCC, shared.EMXX):
       compiler = [shared.PYTHON, compiler]
@@ -959,6 +955,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
     asm_target = unsuffixed(js_target) + '.asm.js' # might not be used, but if it is, this is the name
     wasm_text_target = asm_target.replace('.asm.js', '.wast') # ditto, might not be used
     wasm_binary_target = asm_target.replace('.asm.js', '.wasm') # ditto, might not be used
+    wasm_source_map_target = wasm_binary_target + '.map'
 
     if final_suffix == '.html' and not options.separate_asm and 'PRECISE_F32=2' in settings_changes:
       options.separate_asm = True
@@ -984,7 +981,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
     if error_on_missing_libraries_cmdline:
       shared.Settings.ERROR_ON_MISSING_LIBRARIES = int(error_on_missing_libraries_cmdline[len('ERROR_ON_MISSING_LIBRARIES='):])
 
-    settings_changes.append(process_libraries(libs, lib_dirs, settings_changes, input_files))
+    settings_changes.append(process_libraries(libs, lib_dirs, input_files))
 
     # If not compiling to JS, then we are compiling to an intermediate bitcode objects or library, so
     # ignore dynamic linking, since multiple dynamic linkings can interfere with each other
@@ -1042,11 +1039,12 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
 
     if shared.Settings.WASM_OBJECT_FILES and not shared.Settings.WASM_BACKEND:
       if 'WASM_OBJECT_FILES=1' in settings_changes:
-        logger.error('WASM_OBJECT_FILES can only be used with wasm backend')
-        return 1
+        exit_with_error('WASM_OBJECT_FILES can only be used with wasm backend')
       shared.Settings.WASM_OBJECT_FILES = 0
 
-    if not shared.Settings.STRICT:
+    if shared.Settings.STRICT:
+      shared.Settings.DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR = 1
+    else:
       # The preprocessor define EMSCRIPTEN is deprecated. Don't pass it to code
       # in strict mode. Code should use the define __EMSCRIPTEN__ instead.
       shared.COMPILER_OPTS += ['-DEMSCRIPTEN']
@@ -1210,7 +1208,11 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
       if shared.Settings.USE_PTHREADS == 2:
         exit_with_error('USE_PTHREADS=2 is not longer supported')
       if shared.Settings.ALLOW_MEMORY_GROWTH:
-        exit_with_error('Memory growth is not yet supported with pthreads')
+        if not shared.Settings.WASM:
+          exit_with_error('Memory growth is not supported with pthreads without wasm')
+        else:
+          logging.warning('USE_PTHREADS + ALLOW_MEMORY_GROWTH may run non-wasm code slowly, see https://github.com/WebAssembly/design/issues/1271')
+          options.force_js_opts = options.js_opts = True # for JS instrumentation
       # UTF8Decoder.decode doesn't work with a view of a SharedArrayBuffer
       shared.Settings.TEXTDECODER = 0
       options.js_libraries.append(shared.path_from_root('src', 'library_pthread.js'))
@@ -1336,10 +1338,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
       # Remove the default exported functions 'memcpy', 'memset', 'malloc', 'free', etc. - those should only be linked in if used
       shared.Settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE = []
 
-      # Always build with STRICT mode enabled
-      shared.Settings.STRICT = 1
-
-      # Always use the new HTML5 API event target lookup rules (TODO: enable this when the other PR lands)
+      # Always use the new HTML5 API event target lookup rules
       shared.Settings.DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR = 1
 
       # In asm.js always use memory init file to get the best code size, other modes are not currently supported.
@@ -1598,6 +1597,10 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
           options.debug_level = 4
           shared.Settings.DEBUG_LEVEL = 4
 
+      # For asm.js, the generated JavaScript could preserve LLVM value names, which can be useful for debugging.
+      if options.debug_level >= 3 and not shared.Settings.WASM:
+        newargs.append('-fno-discard-value-names')
+
       # Bitcode args generation code
       def get_clang_args(input_files):
         args = [clang_compiler] + newargs + input_files
@@ -1730,11 +1733,11 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
             # we have multiple files: Link them
             logger.debug('link: ' + str(linker_inputs) + specified_target)
             shared.Building.link_to_object(linker_inputs, specified_target)
-        logger.debug('stopping at bitcode')
+        logger.debug('stopping at object file')
         if shared.Settings.SIDE_MODULE:
-          exit_with_error('SIDE_MODULE must only be used when compiling to an executable shared library, and not when emitting LLVM bitcode. That is, you should be emitting a .wasm file (for wasm) or a .js file (for asm.js). Note that when compiling to a typical native suffix for a shared library (.so, .dylib, .dll; which many build systems do) then Emscripten emits an LLVM bitcode file, which you should then compile to .wasm or .js with SIDE_MODULE.')
+          exit_with_error('SIDE_MODULE must only be used when compiling to an executable shared library, and not when emitting an object file.  That is, you should be emitting a .wasm file (for wasm) or a .js file (for asm.js). Note that when compiling to a typical native suffix for a shared library (.so, .dylib, .dll; which many build systems do) then Emscripten emits an object file, which you should then compile to .wasm or .js with SIDE_MODULE.')
         if final_suffix.lower() in ('.so', '.dylib', '.dll'):
-          logger.warning('When Emscripten compiles to a typical native suffix for shared libraries (.so, .dylib, .dll) then it emits an LLVM bitcode file. You should then compile that to an emscripten SIDE_MODULE (using that flag) with suffix .wasm (for wasm) or .js (for asm.js). (You may also want to adapt your build system to emit the more standard suffix for a file with LLVM bitcode, \'.bc\', which would avoid this warning.)')
+          logger.warning('When Emscripten compiles to a typical native suffix for shared libraries (.so, .dylib, .dll) then it emits an object file. You should then compile that to an emscripten SIDE_MODULE (using that flag) with suffix .wasm (for wasm) or .js (for asm.js). (You may also want to adapt your build system to emit the more standard suffix for a an object file, \'.bc\' or \'.o\', which would avoid this warning.)')
         return 0
 
     # exit block 'process inputs'
@@ -1924,7 +1927,7 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
         wasm_temp = temp_basename + '.wasm'
         shutil.move(wasm_temp, wasm_binary_target)
         if use_source_map(options):
-          shutil.move(wasm_temp + '.map', wasm_binary_target + '.map')
+          shutil.move(wasm_temp + '.map', wasm_source_map_target)
 
       if shared.Settings.CYBERDWARF:
         cd_target = final + '.cd'
@@ -2199,7 +2202,8 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
 
       if shared.Settings.WASM:
         do_binaryen(target, asm_target, options, memfile, wasm_binary_target,
-                    wasm_text_target, misc_temp_files, optimizer)
+                    wasm_text_target, wasm_source_map_target, misc_temp_files,
+                    optimizer)
 
       if shared.Settings.MODULARIZE:
         modularize()
@@ -2251,6 +2255,10 @@ def parse_args(newargs):
   options = EmccOptions()
   settings_changes = []
   should_exit = False
+
+  def check_bad_eq(arg):
+    if '=' in arg:
+      exit_with_error('Invalid parameter (do not use "=" with "--" options)')
 
   for i in range(len(newargs)):
     # On Windows Vista (and possibly others), excessive spaces in the command line
@@ -2588,7 +2596,8 @@ def separate_asm_js(final, asm_target):
 
 
 def do_binaryen(target, asm_target, options, memfile, wasm_binary_target,
-                wasm_text_target, misc_temp_files, optimizer):
+                wasm_text_target, wasm_source_map_target, misc_temp_files,
+                optimizer):
   global final
   logger.debug('using binaryen')
   binaryen_bin = shared.Building.get_binaryen_bin()
@@ -2652,7 +2661,7 @@ def do_binaryen(target, asm_target, options, memfile, wasm_binary_target,
       if debug_info:
         cmd += ['-g']
         if use_source_map(options):
-          cmd += ['--source-map=' + wasm_binary_target + '.map']
+          cmd += ['--source-map=' + wasm_source_map_target]
           cmd += ['--source-map-url=' + options.source_map_base + os.path.basename(wasm_binary_target) + '.map']
       logger.debug('wasm-as (text => binary): ' + ' '.join(cmd))
       shared.check_call(cmd)
@@ -2672,7 +2681,14 @@ def do_binaryen(target, asm_target, options, memfile, wasm_binary_target,
     cmd += shared.Building.get_binaryen_feature_flags()
     if debug_info:
       cmd += ['-g'] # preserve the debug info
-    logger.debug('wasm-opt on BINARYEN_PASSES: ' + ' '.join(cmd))
+    if use_source_map(options):
+      cmd += ['--input-source-map=' + wasm_source_map_target]
+      cmd += ['--output-source-map=' + wasm_source_map_target]
+      cmd += ['--output-source-map-url=' + options.source_map_base + os.path.basename(wasm_binary_target) + '.map']
+      if DEBUG:
+        shared.safe_copy(wasm_source_map_target, os.path.join(shared.get_emscripten_temp_dir(), os.path.basename(wasm_source_map_target) + '.pre-byn'))
+    logger.debug('wasm-opt on BINARYEN_PASSES: %s', cmd)
+    shared.print_compiler_stage(cmd)
     shared.check_call(cmd)
   if shared.Settings.BINARYEN_SCRIPTS:
     binaryen_scripts = os.path.join(shared.BINARYEN_ROOT, 'scripts')
@@ -2699,6 +2715,7 @@ def do_binaryen(target, asm_target, options, memfile, wasm_binary_target,
     if not DEBUG:
       os.unlink(asm_target) # we don't need the asm.js, it can just confuse
 
+  # after generating the wasm, do some final operations
   if shared.Settings.EMIT_EMSCRIPTEN_METADATA:
     wso = shared.WebAssembly.add_emscripten_metadata(final, wasm_binary_target)
     shutil.move(wso, wasm_binary_target)
@@ -3116,7 +3133,7 @@ def worker_js_script(proxy_worker_filename):
   return web_gl_client_src + '\n' + proxy_client_src
 
 
-def process_libraries(libs, lib_dirs, settings_changes, input_files):
+def process_libraries(libs, lib_dirs, input_files):
   libraries = []
 
   # Find library files
@@ -3140,8 +3157,6 @@ def process_libraries(libs, lib_dirs, settings_changes, input_files):
     if not found:
       libraries += shared.Building.path_to_system_js_libraries(lib)
 
-  # Certain linker flags imply some link libraries to be pulled in by default.
-  libraries += shared.Building.path_to_system_js_libraries_for_settings(settings_changes)
   return 'SYSTEM_JS_LIBRARIES="' + ','.join(libraries) + '"'
 
 
@@ -3200,25 +3215,27 @@ def parse_value(text):
       text = text.rstrip()
       assert text[-1] == text[0] and len(text) > 1, 'unclosed opened quoted string. expected final character to be "%s" and length to be greater than 1 in "%s"' % (text[0], text)
       return text[1:-1]
-    else:
-      return text
+    return text
 
-  def parse_string_list_members(text, sep):
+  def parse_string_list_members(text):
+    sep = ','
     values = text.split(sep)
     result = []
     index = 0
     while True:
       current = values[index].lstrip() # Cannot safely rstrip for cases like: "HERE-> ,"
-      assert len(current), "string array should not contain an empty value"
+      if not len(current):
+        exit_with_error('string array should not contain an empty value')
       first = current[0]
       if not(first == "'" or first == '"'):
         result.append(current.rstrip())
       else:
         start = index
         while True: # Continue until closing quote found
-          assert index < len(values), "unclosed quoted string. expected final character to be '%s' in '%s'" % (first, values[start])
+          if index >= len(values):
+            exit_with_error("unclosed quoted string. expected final character to be '%s' in '%s'" % (first, values[start]))
           new = values[index].rstrip()
-          if not len(new) == 0 and new[-1] == first:
+          if new and new[-1] == first:
             if start == index:
               result.append(current.rstrip()[1:-1])
             else:
@@ -3233,23 +3250,22 @@ def parse_value(text):
         break
     return result
 
-  if text[0] == '[':
+  def parse_string_list(text):
     text = text.rstrip()
-    assert text[-1] == ']', 'unclosed opened string list. expected final character to be "]" in "%s"' % (text)
+    if text[-1] != ']':
+      exit_with_error('unclosed opened string list. expected final character to be "]" in "%s"' % (text))
     inner = text[1:-1]
     if inner.strip() == "":
       return []
-    else:
-      return parse_string_list_members(inner, ",")
-  else:
-    try:
-      return int(text)
-    except ValueError:
-      return parse_string_value(text)
+    return parse_string_list_members(inner)
 
+  if text[0] == '[':
+    return parse_string_list(text)
 
-def check_bad_eq(arg):
-  assert '=' not in arg, 'Invalid parameter (do not use "=" with "--" options)'
+  try:
+    return int(text)
+  except ValueError:
+    return parse_string_value(text)
 
 
 def validate_arg_level(level_string, max_level, err_msg, clamp=False):

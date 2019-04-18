@@ -952,7 +952,7 @@ if JAVA is None:
 
 # Target choice.
 ASM_JS_TARGET = 'asmjs-unknown-emscripten'
-WASM_TARGET = 'wasm32-unknown-unknown-wasm'
+WASM_TARGET = 'wasm32-unknown-emscripten'
 
 
 def check_vanilla():
@@ -1025,8 +1025,7 @@ COMPILER_OPTS += [# '-fno-threadsafe-statics', # disabled due to issue 1289
 
 if get_llvm_target() == WASM_TARGET:
   # wasm target does not automatically define emscripten stuff, so do it here.
-  COMPILER_OPTS += ['-D__EMSCRIPTEN__',
-                    '-Dunix',
+  COMPILER_OPTS += ['-Dunix',
                     '-D__unix',
                     '-D__unix__']
 
@@ -1277,6 +1276,9 @@ def verify_settings():
 
     if Settings.SIDE_MODULE or Settings.MAIN_MODULE:
       exit_with_error('emcc: MAIN_MODULE and SIDE_MODULE are not yet supported by the LLVM wasm backend')
+
+    if Settings.EMULATED_FUNCTION_POINTERS:
+      exit_with_error('emcc: EMULATED_FUNCTION_POINTERS is not meaningful with the wasm backend')
 
 
 Settings = SettingsManager()
@@ -1697,111 +1699,6 @@ class Building(object):
       raise
     if res.returncode != 0:
       raise subprocess.CalledProcessError(cmd=args, returncode=res.returncode)
-
-  @staticmethod
-  def build_library(name,
-                    build_dir,
-                    output_dir,
-                    generated_libs,
-                    configure=['sh', './configure'],
-                    configure_args=[],
-                    make=['make'],
-                    make_args='help',
-                    cache=None,
-                    cache_name=None,
-                    copy_project=False,
-                    env_init={},
-                    source_dir=None,
-                    native=False):
-    """Build a library into a .bc file. We build the .bc file once and cache it
-    for all our tests. (We cache in memory since the test directory is destroyed
-    and recreated for each test. Note that we cache separately for different
-    compilers).  This cache is just during the test runner. There is a different
-    concept of caching as well, see |Cache|.
-    """
-
-    if type(generated_libs) is not list:
-      generated_libs = [generated_libs]
-    if source_dir is None:
-      source_dir = path_from_root('tests', name.replace('_native', ''))
-    if make_args == 'help':
-      make_args = ['-j', str(multiprocessing.cpu_count())]
-
-    temp_dir = build_dir
-    if copy_project:
-      project_dir = os.path.join(temp_dir, name)
-      if os.path.exists(project_dir):
-        shutil.rmtree(project_dir)
-      shutil.copytree(source_dir, project_dir) # Useful in debugging sometimes to comment this out, and two lines above
-    else:
-      project_dir = build_dir
-    try:
-      old_dir = os.getcwd()
-    except:
-      old_dir = None
-    os.chdir(project_dir)
-    generated_libs = [os.path.join(project_dir, lib) for lib in generated_libs]
-    # for lib in generated_libs:
-    #   try:
-    #     os.unlink(lib) # make sure compilation completed successfully
-    #   except:
-    #     pass
-    env = Building.get_building_env(native, True)
-    for k, v in env_init.items():
-      env[k] = v
-    if configure:
-      # Useful in debugging sometimes to comment this out (and the lines below
-      # up to and including the |link| call)
-      if EM_BUILD_VERBOSE < 2:
-        stdout = open(os.path.join(project_dir, 'configure_out'), 'w')
-      else:
-        stdout = None
-      if EM_BUILD_VERBOSE < 1:
-        stderr = open(os.path.join(project_dir, 'configure_err'), 'w')
-      else:
-        stderr = None
-      try:
-        Building.configure(configure + configure_args, env=env, stdout=stdout, stderr=stderr)
-      except subprocess.CalledProcessError as e:
-        pass # Ignore exit code != 0
-
-    def open_make_out(i, mode='r'):
-      return open(os.path.join(project_dir, 'make_out' + str(i)), mode)
-
-    def open_make_err(i, mode='r'):
-      return open(os.path.join(project_dir, 'make_err' + str(i)), mode)
-
-    if EM_BUILD_VERBOSE >= 3:
-      make_args += ['VERBOSE=1']
-
-    # FIXME: Sad workaround for some build systems that need to be run twice to succeed (e.g. poppler)
-    for i in range(2):
-      with open_make_out(i, 'w') as make_out:
-        with open_make_err(i, 'w') as make_err:
-          stdout = make_out if EM_BUILD_VERBOSE < 2 else None
-          stderr = make_err if EM_BUILD_VERBOSE < 1 else None
-          try:
-            Building.make(make + make_args, stdout=stdout, stderr=stderr, env=env)
-          except subprocess.CalledProcessError as e:
-            pass # Ignore exit code != 0
-      try:
-        if cache is not None:
-          cache[cache_name] = []
-          for f in generated_libs:
-            basename = os.path.basename(f)
-            cache[cache_name].append((basename, open(f, 'rb').read()))
-        break
-      except Exception as e:
-        if i > 0:
-          if EM_BUILD_VERBOSE == 0:
-            # Due to the ugly hack above our best guess is to output the first run
-            with open_make_err(0) as ferr:
-              for line in ferr:
-                sys.stderr.write(line)
-          raise Exception('could not build library ' + name + ' due to exception ' + str(e))
-    if old_dir:
-      os.chdir(old_dir)
-    return generated_libs
 
   @staticmethod
   def make_paths_absolute(f):
@@ -2401,7 +2298,10 @@ class Building(object):
   # evals ctors. if binaryen_bin is provided, it is the dir of the binaryen tool for this, and we are in wasm mode
   @staticmethod
   def eval_ctors(js_file, binary_file, binaryen_bin='', debug_info=False):
-    check_call([PYTHON, path_from_root('tools', 'ctor_evaller.py'), js_file, binary_file, str(Settings.TOTAL_MEMORY), str(Settings.TOTAL_STACK), str(Settings.GLOBAL_BASE), binaryen_bin, str(int(debug_info))])
+    cmd = [PYTHON, path_from_root('tools', 'ctor_evaller.py'), js_file, binary_file, str(Settings.TOTAL_MEMORY), str(Settings.TOTAL_STACK), str(Settings.GLOBAL_BASE), binaryen_bin, str(int(debug_info))]
+    if binaryen_bin:
+      cmd += Building.get_binaryen_feature_flags()
+    check_call(cmd)
 
   @staticmethod
   def eliminate_duplicate_funcs(filename):
@@ -2478,12 +2378,10 @@ class Building(object):
 
       if not Settings.ASMFS:
         # If we have filesystem disabled, tell Closure not to bark when there are syscalls emitted that still reference the nonexisting FS object.
-        if not Settings.FILESYSTEM:
-          CLOSURE_ANNOTATIONS += ['--js', path_from_root('src', 'closure-undefined-fs-annotation.js')]
-
-        # If we do have filesystem enabled, tell Closure not to bark when FS references different libraries that might not exist.
-        if Settings.FILESYSTEM and not Settings.ASMFS:
+        if Settings.FILESYSTEM:
           CLOSURE_ANNOTATIONS += ['--js', path_from_root('src', 'closure-defined-fs-annotation.js')]
+        else:
+          CLOSURE_ANNOTATIONS += ['--js', path_from_root('src', 'closure-undefined-fs-annotation.js')]
 
       # Closure externs file contains known symbols to be extern to the minification, Closure
       # should not minify these symbol names.
@@ -2547,7 +2445,10 @@ class Building(object):
       proc = run_process(args, stderr=PIPE, check=False)
       if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
-        exit_with_error('closure compiler failed (rc: %d)', proc.returncode)
+        hint = ''
+        if not pretty:
+          hint = ' the error message may be clearer with -g1'
+        exit_with_error('closure compiler failed (rc: %d.%s)', proc.returncode, hint)
 
       return outfile
 
@@ -2762,25 +2663,6 @@ class Building(object):
     return library_files
 
   @staticmethod
-  # Given a list of Emscripten link settings, returns a list of paths to system JS libraries
-  # that should get linked automatically in to the build when those link settings are present.
-  def path_to_system_js_libraries_for_settings(link_settings):
-    system_js_libraries = []
-    if 'EMTERPRETIFY_ASYNC=1' in link_settings:
-      system_js_libraries += ['library_async.js']
-    if 'ASYNCIFY=1' in link_settings:
-      system_js_libraries += ['library_async.js']
-    if 'LZ4=1' in link_settings:
-      system_js_libraries += ['library_lz4.js']
-    if 'USE_SDL=1' in link_settings:
-      system_js_libraries += ['library_sdl.js']
-    if 'USE_SDL=2' in link_settings:
-      system_js_libraries += ['library_egl.js', 'library_webgl.js']
-    if 'USE_WEBGL2=1' in link_settings:
-      system_js_libraries += ['library_webgl2.js']
-    return [path_from_root('src', x) for x in system_js_libraries]
-
-  @staticmethod
   def get_binaryen_feature_flags():
     # start with the MVP features, add the rest as needed
     ret = ['--mvp-features']
@@ -2788,6 +2670,7 @@ class Building(object):
       ret += ['--enable-threads']
     if Settings.SIMD:
       ret += ['--enable-simd']
+    ret += Settings.BINARYEN_FEATURES
     return ret
 
   @staticmethod

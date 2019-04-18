@@ -32,7 +32,7 @@ from tools.shared import EMCC, EMXX, EMAR, EMRANLIB, PYTHON, FILE_PACKAGER, WIND
 from tools.shared import CLANG, CLANG_CC, CLANG_CPP, LLVM_AR
 from tools.shared import COMPILER_ENGINE, NODE_JS, SPIDERMONKEY_ENGINE, JS_ENGINES, V8_ENGINE
 from tools.shared import WebAssembly
-from runner import RunnerCore, path_from_root, get_zlib_library, no_wasm_backend
+from runner import RunnerCore, path_from_root, no_wasm_backend, no_fastcomp
 from runner import needs_dlfcn, env_modify, no_windows, chdir, with_env_modify, create_test_file
 from tools import jsrun, shared
 import tools.line_endings
@@ -582,11 +582,9 @@ f.close()
       # while still keeping this test in sensible time limit.
       cases = [
         ('target_js',      'test_cmake.js',         ['-DCMAKE_BUILD_TYPE=Debug']),
-        ('target_html',    'hello_world_gles.html', ['-DCMAKE_BUILD_TYPE=Release',        '-DBUILD_SHARED_LIBS=OFF']),
-        ('target_library', 'libtest_cmake.a',       ['-DCMAKE_BUILD_TYPE=MinSizeRel',     '-DBUILD_SHARED_LIBS=OFF']),
+        ('target_html',    'hello_world_gles.html', ['-DCMAKE_BUILD_TYPE=Release']),
+        ('target_library', 'libtest_cmake.a',       ['-DCMAKE_BUILD_TYPE=MinSizeRel']),
         ('target_library', 'libtest_cmake.a',       ['-DCMAKE_BUILD_TYPE=RelWithDebInfo', '-DCPP_LIBRARY_TYPE=STATIC']),
-        ('target_library', 'libtest_cmake.so',      ['-DCMAKE_BUILD_TYPE=Release',        '-DBUILD_SHARED_LIBS=ON']),
-        ('target_library', 'libtest_cmake.so',      ['-DCMAKE_BUILD_TYPE=Release',        '-DBUILD_SHARED_LIBS=ON', '-DCPP_LIBRARY_TYPE=SHARED']),
         ('stdproperty',    'helloworld.js',         [])
       ]
       for test_dir, output_file, cmake_args in cases:
@@ -1060,7 +1058,7 @@ int main() {
     ]:
       Building.COMPILER_TEST_OPTS = test_opts
       test('zlib', path_from_root('tests', 'zlib', 'example.c'),
-           get_zlib_library(self),
+           self.get_zlib_library(),
            open(path_from_root('tests', 'zlib', 'ref.txt')).read(),
            expected_ranges,
            args=['-I' + path_from_root('tests', 'zlib')], suffix='c')
@@ -1575,10 +1573,11 @@ int f() {
 
     # Verify that archive contains basenames with hashes to avoid duplication
     text = run_process([PYTHON, EMAR, 't', 'liba.a'], stdout=PIPE).stdout
-    self.assertNotIn('common.o', text)
-    assert text.count('common_') == 2, text
+    self.assertEqual(text.count('common.o'), 1)
+    self.assertContained('common_', text)
     for line in text.split('\n'):
-      assert len(line) < 20, line # should not have huge hash names
+      # should not have huge hash names
+      self.assertLess(len(line), 20, line)
 
     create_test_file('main.c', r'''
       void a(void);
@@ -1827,6 +1826,11 @@ int f() {
     Building.emcc(path_from_root('tests', 'pngtest.c'), ['--embed-file', 'pngtest.png', '-s', 'USE_ZLIB=1', '-s', 'USE_LIBPNG=1'], output_filename='a.out.js')
     self.assertContained('TESTS PASSED', run_process(JS_ENGINES[0] + ['a.out.js'], stdout=PIPE, stderr=PIPE).stdout)
 
+  def test_libjpeg(self):
+    shutil.copyfile(path_from_root('tests', 'screenshot.jpg'), 'screenshot.jpg')
+    Building.emcc(path_from_root('tests', 'jpeg_test.c'), ['--embed-file', 'screenshot.jpg', '-s', 'USE_LIBJPEG=1'], output_filename='a.out.js')
+    self.assertContained('Image is 600 by 450 with 3 components', run_process(JS_ENGINES[0] + ['a.out.js', 'screenshot.jpg'], stdout=PIPE, stderr=PIPE).stdout)
+
   def test_bullet(self):
     Building.emcc(path_from_root('tests', 'bullet_hello_world.cpp'), ['-s', 'USE_BULLET=1'], output_filename='a.out.js')
     self.assertContained('BULLET RUNNING', run_process(JS_ENGINES[0] + ['a.out.js'], stdout=PIPE, stderr=PIPE).stdout)
@@ -1835,6 +1839,10 @@ int f() {
     # This will also test if ogg compiles, because vorbis depends on ogg
     Building.emcc(path_from_root('tests', 'vorbis_test.c'), ['-s', 'USE_VORBIS=1'], output_filename='a.out.js')
     self.assertContained('ALL OK', run_process(JS_ENGINES[0] + ['a.out.js'], stdout=PIPE, stderr=PIPE).stdout)
+
+  def test_bzip2(self):
+    Building.emcc(path_from_root('tests', 'bzip2_test.c'), ['-s', 'USE_BZIP2=1'], output_filename='a.out.js')
+    self.assertContained("usage: unzcrash filename", run_process(JS_ENGINES[0] + ['a.out.js'], stdout=PIPE, stderr=PIPE).stdout)
 
   def test_freetype(self):
     # copy the Liberation Sans Bold truetype file located in the
@@ -1969,34 +1977,6 @@ int f() {
     self.do_other_test(os.path.join('other', 'GetProcAddress_LEGACY_GL_EMULATION'), run_args=['0'], emcc_args=['-s', 'LEGACY_GL_EMULATION=0'])
     # with it, it should work
     self.do_other_test(os.path.join('other', 'GetProcAddress_LEGACY_GL_EMULATION'), run_args=['1'], emcc_args=['-s', 'LEGACY_GL_EMULATION=1'])
-
-  @no_wasm_backend('linker detects out-of-memory')
-  def test_toobig(self):
-    # very large [N x i8], we should not oom in the compiler
-    create_test_file('main.cpp', r'''
-      #include <stdio.h>
-
-      #define BYTES (50 * 1024 * 1024)
-
-      int main(int argc, char **argv) {
-        if (argc == 100) {
-          static char buf[BYTES];
-          static char buf2[BYTES];
-          for (int i = 0; i < BYTES; i++) {
-            buf[i] = i*i;
-            buf2[i] = i/3;
-          }
-          for (int i = 0; i < BYTES; i++) {
-            buf[i] = buf2[i/2];
-            buf2[i] = buf[i/3];
-          }
-          printf("%d\n", buf[10] + buf2[20]);
-        }
-        return 0;
-      }
-      ''')
-    run_process([PYTHON, EMCC, 'main.cpp'])
-    self.assertExists('a.out.js')
 
   def test_prepost(self):
     create_test_file('main.cpp', '''
@@ -2527,8 +2507,8 @@ seeked= file.
 
     run_process([PYTHON, EMCC, 'main.o', '-s', 'supp.o', '-s', 'SAFE_HEAP=1'])
     self.assertContained('yello', run_js('a.out.js'))
-    code = open('a.out.js').read()
-    assert 'SAFE_HEAP' in code, 'valid -s option had an effect'
+    # Check that valid -s option had an effect'
+    self.assertContained('SAFE_HEAP', open('a.out.js').read())
 
   def test_conftest_s_flag_passing(self):
     create_test_file('conftest.c', r'''
@@ -3847,8 +3827,9 @@ int main()
     shared_suffixes = ['.so', '.dylib', '.dll']
 
     for suffix in ['.o', '.a', '.bc', '.so', '.lib', '.dylib', '.js', '.html']:
-      err = run_process([PYTHON, EMCC, path_from_root('tests', 'hello_world.c'), '-o', 'out' + suffix], stdout=PIPE, stderr=PIPE).stderr
-      warning = 'When Emscripten compiles to a typical native suffix for shared libraries (.so, .dylib, .dll) then it emits an LLVM bitcode file. You should then compile that to an emscripten SIDE_MODULE (using that flag) with suffix .wasm (for wasm) or .js (for asm.js).'
+      print(suffix)
+      err = run_process([PYTHON, EMCC, path_from_root('tests', 'hello_world.c'), '-o', 'out' + suffix], stderr=PIPE).stderr
+      warning = 'When Emscripten compiles to a typical native suffix for shared libraries (.so, .dylib, .dll) then it emits an object file. You should then compile that to an emscripten SIDE_MODULE (using that flag) with suffix .wasm (for wasm) or .js (for asm.js).'
       if suffix in shared_suffixes:
         self.assertContained(warning, err)
       else:
@@ -3860,9 +3841,9 @@ int main()
     # otherwise, we are just linking bitcode, and should show an error
     for wasm in [0, 1]:
       print(wasm)
-      process = run_process([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-s', 'SIDE_MODULE=1', '-o', 'a.so', '-s', 'WASM=%d' % wasm], stdout=PIPE, stderr=PIPE, check=False)
-      self.assertContained('SIDE_MODULE must only be used when compiling to an executable shared library, and not when emitting LLVM bitcode', process.stderr)
-      assert process.returncode is not 0
+      process = run_process([PYTHON, EMCC, path_from_root('tests', 'hello_world.cpp'), '-s', 'SIDE_MODULE=1', '-o', 'a.so', '-s', 'WASM=%d' % wasm], stderr=PIPE, check=False)
+      self.assertContained('SIDE_MODULE must only be used when compiling to an executable shared library, and not when emitting an object file', process.stderr)
+      self.assertNotEqual(process.returncode, 0)
 
   @no_wasm_backend()
   def test_simplify_ifs(self):
@@ -7947,9 +7928,9 @@ int main() {
       self.run_metadce_test('minimal.c', *args)
 
     if self.is_wasm_backend():
-      run([],      11, [], ['waka'],  9336,  5, 13, 16) # noqa
-      run(['-O1'],  9, [], ['waka'],  8095,  2, 12, 10) # noqa
-      run(['-O2'],  9, [], ['waka'],  8077,  2, 12, 10) # noqa
+      run([],      11, [], ['waka'],  9211,  5, 13, 16) # noqa
+      run(['-O1'],  9, [], ['waka'],  7886,  2, 12, 10) # noqa
+      run(['-O2'],  9, [], ['waka'],  7871,  2, 12, 10) # noqa
       # in -O3, -Os and -Oz we metadce, and they shrink it down to the minimal output we want
       run(['-O3'],  0, [], [],          85,  0,  2,  2) # noqa
       run(['-Os'],  0, [], [],          85,  0,  2,  2) # noqa
@@ -7969,28 +7950,28 @@ int main() {
 
     # test on libc++: see effects of emulated function pointers
     if self.is_wasm_backend():
-      run(['-O2'], 32, [], ['waka'], 226582,  20,  33, 562) # noqa
+      run(['-O2'], 32, [], ['waka'], 226582,  20,  34, 561) # noqa
     else:
-      run(['-O2'], 34, ['abort'], ['waka'], 186423,  28,   36, 534) # noqa
+      run(['-O2'], 34, ['abort'], ['waka'], 186423,  28,  37, 537) # noqa
       run(['-O2', '-s', 'EMULATED_FUNCTION_POINTERS=1'],
-                  34, ['abort'], ['waka'], 186423,  28,   37, 516) # noqa
+                   34, ['abort'], ['waka'], 186423,  28,  38, 518) # noqa
 
   def test_binaryen_metadce_hello(self):
     def run(*args):
       self.run_metadce_test(path_from_root('tests', 'hello_world.cpp'), *args)
 
     if self.is_wasm_backend():
-      run([],      16, [], ['waka'], 26641, 10,  15, 62) # noqa
-      run(['-O1'], 14, [], ['waka'], 10668,  8,  14, 29) # noqa
-      run(['-O2'], 14, [], ['waka'], 10490,  8,  14, 24) # noqa
-      run(['-O3'],  5, [], [],        2453,  7,   3, 14) # noqa; in -O3, -Os and -Oz we metadce
-      run(['-Os'],  5, [], [],        2408,  7,   3, 15) # noqa
-      run(['-Oz'],  5, [], [],        2367,  7,   2, 14) # noqa
+      run([],      16, [], ['waka'], 22185, 10,  17, 55) # noqa
+      run(['-O1'], 14, [], ['waka'], 10415,  8,  14, 29) # noqa
+      run(['-O2'], 14, [], ['waka'], 10183,  8,  14, 24) # noqa
+      run(['-O3'],  5, [], [],        2353,  7,   3, 14) # noqa; in -O3, -Os and -Oz we metadce
+      run(['-Os'],  5, [], [],        2310,  7,   3, 15) # noqa
+      run(['-Oz'],  5, [], [],        2272,  7,   2, 14) # noqa
       # finally, check what happens when we export nothing. wasm should be almost empty
       run(['-Os', '-s', 'EXPORTED_FUNCTIONS=[]'],
                    0, [], [],          61,  0,   1,  1) # noqa
     else:
-      run([],      20, ['abort'], ['waka'], 42701,  20,   14, 49) # noqa
+      run([],      22, ['abort'], ['waka'], 42701,  22,   16, 54) # noqa
       run(['-O1'], 15, ['abort'], ['waka'], 12630,  14,   13, 30) # noqa
       run(['-O2'], 15, ['abort'], ['waka'], 12616,  14,   13, 26) # noqa
       run(['-O3'],  6, [],        [],        2443,   9,    2, 14) # noqa; in -O3, -Os and -Oz we metadce
@@ -8001,7 +7982,7 @@ int main() {
                    0, [],        [],           8,   0,    0,  0) # noqa; totally empty!
       # we don't metadce with linkable code! other modules may want stuff
       run(['-O3', '-s', 'MAIN_MODULE=1'],
-                1537, [],        [],      226403,  28,   93, None) # noqa; don't compare the # of functions in a main module, which changes a lot
+                1541, [],        [],      226403,  30,   95, None) # noqa; don't compare the # of functions in a main module, which changes a lot
 
   # ensures runtime exports work, even with metadce
   def test_extra_runtime_exports(self):
@@ -8090,25 +8071,45 @@ int main() {
       assert i_legalimport_i64, 'legal import not generated for invoke call'
       assert e_legalstub_i32, 'legal stub not generated for dyncall'
 
+  def test_export_aliasee(self):
+    # test aliasee is exported when alias is exported
+    if self.is_wasm_backend():
+      self.skipTest('not testing export aliasee and wasm backend')
+
+    with env_modify({'EMCC_FORCE_STDLIBS': 'libc++'}):
+      # build side module
+      args = ['-s', 'EXPORT_ALL=0', '-s', 'SIDE_MODULE=1', '-O3', '-s', 'DISABLE_EXCEPTION_CATCHING=0']
+      print(args)
+      cmd = [PYTHON, EMCC, path_from_root('tests', 'other', 'alias', 'side.cpp'), '-g', '-o', 'side.wasm'] + args
+      print(' '.join(cmd))
+      run_process(cmd)
+
+      # build main module
+      args = ['-s', 'EXPORT_ALL=0', '-s', 'EXPORTED_FUNCTIONS=["_main", "_wprintf","__ZTVSt12length_error","__ZNSt12length_errorD1Ev","__ZNSt11logic_errorC2EPKc"]', '-s', 'MAIN_MODULE=2', '-O3', '-s', 'DISABLE_EXCEPTION_CATCHING=0']
+      cmd = [PYTHON, EMCC, path_from_root('tests', 'other', 'alias', 'main.cpp'), '-g', '-o', 'main.out.js'] + args
+      print(' '.join(cmd))
+      run_process(cmd)
+      # run the program
+      ret = run_process(NODE_JS + ['main.out.js'], stdout=PIPE, stderr=PIPE).stdout
+      self.assertContained('success', ret)
+
   def test_sysconf_phys_pages(self):
-    for args, expected in [
-        ([], 1024),
-        (['-s', 'TOTAL_MEMORY=32MB'], 2048),
-        (['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1'], (2 * 1024 * 1024 * 1024 - 65536) // 16384),
-        (['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'WASM=0'], (2 * 1024 * 1024 * 1024 - 16777216) // 16384),
-        (['-s', 'TOTAL_MEMORY=32MB', '-s', 'BINARYEN=1'], 2048),
-        (['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'BINARYEN=1'], (2 * 1024 * 1024 * 1024 - 65536) // 16384),
-        (['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'BINARYEN=1', '-s', 'WASM_MEM_MAX=128MB'], 2048 * 4)
-      ]:
-      if self.is_wasm_backend():
-        if 'WASM=0' in args:
-          continue
+    def run(args, expected):
+      if self.is_wasm_backend() and 'WASM=0' in args:
+        return
       cmd = [PYTHON, EMCC, path_from_root('tests', 'unistd', 'sysconf_phys_pages.c')] + args
       print(str(cmd))
       run_process(cmd)
       result = run_js('a.out.js').strip()
-      print(result)
-      assert result == str(expected) + ', errno: 0', expected
+      self.assertEqual(result,  str(expected) + ', errno: 0')
+
+    run([], 1024)
+    run(['-s', 'TOTAL_MEMORY=32MB'], 2048)
+    run(['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1'], (2 * 1024 * 1024 * 1024 - 65536) // 16384)
+    run(['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'WASM=0'], (2 * 1024 * 1024 * 1024 - 16777216) // 16384)
+    run(['-s', 'TOTAL_MEMORY=32MB', '-s', 'BINARYEN=1'], 2048)
+    run(['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'BINARYEN=1'], (2 * 1024 * 1024 * 1024 - 65536) // 16384)
+    run(['-s', 'TOTAL_MEMORY=32MB', '-s', 'ALLOW_MEMORY_GROWTH=1', '-s', 'BINARYEN=1', '-s', 'WASM_MEM_MAX=128MB'], 2048 * 4)
 
   def test_wasm_targets(self):
     for opts, potentially_expect_minified_exports_and_imports in (
@@ -8236,6 +8237,21 @@ int main() {
     run_process([CLANG, '-c', path_from_root('tests', 'hello_world.cpp'), '-o', 'hello_world.o'])
     err = run_process([PYTHON, EMCC, 'hello_world.o', '-o', 'hello_world.js'], stdout=PIPE, stderr=PIPE, check=False).stderr
     self.assertContained('hello_world.o is not a valid input', err)
+
+  # Tests that we should give a clear error on TOTAL_MEMORY not being enough for static initialization + stack
+  def test_clear_error_on_massive_static_data(self):
+    with open('src.cpp', 'w') as f:
+      f.write('''
+        char muchData[128 * 1024];
+        int main() {
+          return (int)&muchData;
+        }
+      ''')
+    err = run_process([PYTHON, EMCC, 'src.cpp', '-s', 'TOTAL_STACK=1KB', '-s', 'TOTAL_MEMORY=64KB'], check=False, stderr=PIPE).stderr
+    if self.is_wasm_backend():
+      self.assertContained('wasm-ld: error: initial memory too small', err)
+    else:
+      self.assertContained('Memory is not large enough for static data (133984) plus the stack (1024), please increase TOTAL_MEMORY (65536)', err)
 
   def test_o_level_clamp(self):
     for level in [3, 4, 20]:
@@ -9079,10 +9095,15 @@ int main () {
         size = os.path.getsize(f)
         print('size of ' + f + ' == ' + str(size) + ', expected ' + str(expected_size) + ', delta=' + str(size - expected_size) + print_percent(size, expected_size))
 
-        # Hack: Generated .mem initializer files have different sizes on different platforms (Windows gives x, CircleCI Linux gives x-17 bytes, my home Linux gives x+2 bytes..)
-        # TODO: identify what is causing this (until that, expected .mem initializer file sizes are conservative estimates that do not contribute to total size)
+        # Hack: Generated .mem initializer files have different sizes on different
+        # platforms (Windows gives x, CircleCI Linux gives x-17 bytes, my home
+        # Linux gives x+2 bytes..). Likewise asm.js files seem to be affected by
+        # the LLVM IR text names, which lead to asm.js names, which leads to
+        # difference code size, which leads to different relooper choices,
+        # as a result leading to slightly different total code sizes.
+        # TODO: identify what is causing this. meanwhile allow some amount of slop
         mem_slop = 20
-        if f.endswith('.mem') or f.endswith('.wasm') and size <= expected_size + mem_slop and size >= expected_size - mem_slop:
+        if size <= expected_size + mem_slop and size >= expected_size - mem_slop:
           size = expected_size
 
         total_output_size += size
@@ -9117,3 +9138,41 @@ int main () {
     proc = run_process(cmd + ['-s', 'STRICT=1'], stderr=PIPE, check=False)
     self.assertNotEqual(proc.returncode, 0)
     self.assertContained('legacy setting used in strict mode: SPLIT_MEMORY', proc.stderr)
+
+  def test_safe_heap_log(self):
+    self.set_setting('SAFE_HEAP')
+    self.set_setting('SAFE_HEAP_LOG')
+    self.set_setting('EXIT_RUNTIME')
+    src = open(path_from_root('tests', 'hello_world.c')).read()
+    self.do_run(src, 'SAFE_HEAP load: ')
+
+    if not self.is_wasm_backend():
+      self.set_setting('WASM', 0)
+      self.do_run(src, 'SAFE_HEAP load: ')
+
+  @no_fastcomp('iprintf/__small_printf are wasm-backend-only features')
+  def test_mini_printfs(self):
+    def test(code):
+      with open('src.c', 'w') as f:
+        f.write('''
+          #include <stdio.h>
+          int main() {
+            volatile void* unknown_value;
+            %s
+          }
+        ''' % code)
+      run_process([PYTHON, EMCC, 'src.c', '-O1'])
+      return os.path.getsize('a.out.wasm')
+
+    i = test('printf("%d", *(int*)unknown_value);')
+    f = test('printf("%f", *(double*)unknown_value);')
+    lf = test('printf("%Lf", *(long double*)unknown_value);')
+    both = test('printf("%d", *(int*)unknown_value); printf("%Lf", *(long double*)unknown_value);')
+    print(i, f, lf, both)
+
+    # iprintf is much smaller than printf with float support
+    assert f - 3400 <= i <= f - 3000
+    # __small_printf is somewhat smaller than printf with long double support
+    assert lf - 900 <= f <= lf - 500
+    # both is a little bigger still
+    assert both - 100 <= lf <= both - 50

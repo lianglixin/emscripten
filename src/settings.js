@@ -1080,6 +1080,12 @@ var USE_ICU = 0;
 // 1 = use zlib from emscripten-ports
 var USE_ZLIB = 0;
 
+// 1 = use bzip2 from emscripten-ports
+var USE_BZIP2 = 0;
+
+// 1 = use libjpeg from emscripten-ports
+var USE_LIBJPEG = 0;
+
 // 1 = use libpng from emscripten-ports
 var USE_LIBPNG = 0;
 
@@ -1320,11 +1326,6 @@ var STATIC_BUMP = -1;
 // the total initial wasm table size.
 var WASM_TABLE_SIZE = 0;
 
-// if set to 1, then generated WASM files will contain a custom
-// "emscripten_metadata" section that contains information necessary
-// to execute the file without the accompanying JS file.
-var EMIT_EMSCRIPTEN_METADATA = 0;
-
 // Tracks whether we are building with errno support enabled. Set to 0
 // to disable compiling errno support in altogether. This saves a little
 // bit of generated code size in applications that do not care about
@@ -1387,6 +1388,10 @@ var DISABLE_DEPRECATED_FIND_EVENT_TARGET_BEHAVIOR = 0;
 // is retained. Minification requires at least -O1 or -Os to be used. Pass -s MINIFY_HTML=0
 // to explicitly choose to disable HTML minification altogether.
 var MINIFY_HTML = 1;
+
+// A list of feature flags to pass to each binaryen invocation (like wasm-opt, etc.). This
+// is received from wasm-emscripten-finalize, which reads it from the features section.
+var BINARYEN_FEATURES = [];
 
 // Legacy settings that have been removed, and the values they are now fixed to.
 // These can no longer be changed:

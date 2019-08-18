@@ -65,8 +65,15 @@ var LibraryManager = {
       'library_path.js',
       'library_signals.js',
       'library_syscall.js',
-      'library_html5.js'
+      'library_html5.js',
+      'library_stack_trace.js'
     ];
+
+    if (!DISABLE_EXCEPTION_THROWING) {
+      libraries.push('library_exceptions.js');
+    } else {
+      libraries.push('library_exceptions_stub.js');
+    }
 
     if (!MINIMAL_RUNTIME) {
       libraries.push('library_browser.js');
@@ -200,8 +207,8 @@ var LibraryManager = {
       if (typeof lib[x] === 'string') {
         var target = x;
         while (typeof lib[target] === 'string') {
-          // ignore code, aliases are just simple names
-          if (lib[target].search(/[({; ]/) >= 0) continue libloop;
+          // ignore code and variable assignments, aliases are just simple names
+          if (lib[target].search(/[=({; ]/) >= 0) continue libloop;
           // ignore trivial pass-throughs to Math.*
           if (lib[target].indexOf('Math_') == 0) continue libloop;
           target = lib[target];
@@ -318,7 +325,8 @@ function isExportedByForceFilesystem(name) {
          name === 'FS_unlink' ||
          name === 'getMemory' ||
          name === 'addRunDependency' ||
-         name === 'removeRunDependency';
+         name === 'removeRunDependency' ||
+         name === 'calledRun';
 }
 
 // export parts of the JS runtime that the user asked for
@@ -354,9 +362,9 @@ function exportRuntime() {
         extra = '. Alternatively, forcing filesystem support (-s FORCE_FILESYSTEM=1) can export this for you';
       }
       if (!isNumber) {
-        return 'if (!Module["' + name + '"]) Module["' + name + '"] = function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") };';
+        return 'if (!Object.getOwnPropertyDescriptor(Module, "' + name + '")) Module["' + name + '"] = function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") };';
       } else {
-        return 'if (!Module["' + name + '"]) Object.defineProperty(Module, "' + name + '", { get: function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") } });';
+        return 'if (!Object.getOwnPropertyDescriptor(Module, "' + name + '")) Object.defineProperty(Module, "' + name + '", { get: function() { abort("\'' + name + '\' was not exported. add it to EXTRA_EXPORTED_RUNTIME_METHODS (see the FAQ)' + extra + '") } });';
       }
     }
     return '';
@@ -413,7 +421,6 @@ function exportRuntime() {
     'FS_unlink',
     'GL',
     'dynamicAlloc',
-    'warnOnce',
     'loadDynamicLibrary',
     'loadWebAssemblyModule',
     'getLEB',
@@ -435,10 +442,12 @@ function exportRuntime() {
     'printErr',
     'getTempRet0',
     'setTempRet0',
+    'callMain',
   ];
 
   if (!MINIMAL_RUNTIME) {
     runtimeElements.push('Pointer_stringify');
+    runtimeElements.push('warnOnce');
   }
 
   if (MODULARIZE) {
@@ -472,6 +481,7 @@ function exportRuntime() {
     'ALLOC_STACK',
     'ALLOC_DYNAMIC',
     'ALLOC_NONE',
+    'calledRun',
   ];
   if (ASSERTIONS) {
     // check all exported things exist, warn about typos

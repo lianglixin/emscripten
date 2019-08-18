@@ -28,16 +28,14 @@ function dynamicAlloc(size) {
 #endif
   var ret = HEAP32[DYNAMICTOP_PTR>>2];
   var end = (ret + size + 15) & -16;
-  if (end <= _emscripten_get_heap_size()) {
-    HEAP32[DYNAMICTOP_PTR>>2] = end;
-  } else {
-#if ALLOW_MEMORY_GROWTH
-    var success = _emscripten_resize_heap(end);
-    if (!success) return 0;
+  if (end > _emscripten_get_heap_size()) {
+#if ASSERTIONS
+    abort('failure to dynamicAlloc - memory growth etc. is not supported there, call malloc/sbrk directly');
 #else
-    return 0;
+    abort();
 #endif
   }
+  HEAP32[DYNAMICTOP_PTR>>2] = end;
   return ret;
 }
 
@@ -58,7 +56,9 @@ var asm2wasmImports = { // special asm2wasm imports
         return x % y;
     },
     "debugger": function() {
+#if ASSERTIONS // Disable debugger; statement from being present in release builds to avoid Firefox deoptimizations, see https://bugzilla.mozilla.org/show_bug.cgi?id=1538375
         debugger;
+#endif
     }
 #if NEED_ALL_ASM2WASM_IMPORTS
     ,
@@ -190,14 +190,14 @@ function loadDynamicLibrary(lib, flags) {
       return fetchBinary(lib);
     }
     // load the binary synchronously
-    return Module['readBinary'](lib);
+    return readBinary(lib);
 #else
     // for js we only imitate async for both native & fs modes.
     var libData;
     if (flags.fs) {
       libData = flags.fs.readFile(lib, {encoding: 'utf8'});
     } else {
-      libData = Module['read'](lib);
+      libData = read_(lib);
     }
     return flags.loadAsync ? Promise.resolve(libData) : libData;
 #endif
@@ -462,7 +462,6 @@ function loadWebAssemblyModule(binary, flags) {
           var fp = 0;
           return obj[prop] = function() {
             if (!fp) {
-              console.log("geting function address: " + name);
               var f = resolveSymbol(name, 'function');
               fp = addFunctionWasm(f, sig);
             }
@@ -650,6 +649,10 @@ var functionPointers = new Array({{{ RESERVED_FUNCTION_POINTERS }}});
 // we create a wasm module that takes the JS function as an import with a given
 // signature, and re-exports that as a wasm function.
 function convertJsFunctionToWasm(func, sig) {
+#if WASM2JS
+  return func;
+#else // WASM2JS
+
   // The module is static, with the exception of the type section, which is
   // generated based on the signature passed in.
   var typeSection = [
@@ -708,6 +711,7 @@ function convertJsFunctionToWasm(func, sig) {
   });
   var wrappedFunc = instance.exports.f;
   return wrappedFunc;
+#endif // WASM2JS
 }
 
 // Add a wasm function to the table.
@@ -921,11 +925,11 @@ var tempRet0 = 0;
 
 var setTempRet0 = function(value) {
   tempRet0 = value;
-}
+};
 
 var getTempRet0 = function() {
   return tempRet0;
-}
+};
 
 #if RETAIN_COMPILER_SETTINGS
 var compilerSettings = {{{ JSON.stringify(makeRetainedCompilerSettings()) }}} ;
@@ -965,7 +969,7 @@ GLOBAL_BASE = alignMemory(GLOBAL_BASE, {{{ MAX_GLOBAL_ALIGN || 1 }}});
 // The wasm backend path does not have a way to set the stack max, so we can
 // just implement this function in a trivial way
 function establishStackSpace(base, max) {
-  stackRestore(base);
+  stackRestore(max);
 }
 
 // JS library code refers to Atomics in the manner used from asm.js, provide

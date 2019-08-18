@@ -52,12 +52,15 @@ class Benchmarker(object):
   def __init__(self, name):
     self.name = name
 
-  def bench(self, args, output_parser=None, reps=TEST_REPS):
+  def bench(self, args, output_parser=None, reps=TEST_REPS, expected_output=None):
     self.times = []
     self.reps = reps
     for i in range(reps):
       start = time.time()
       output = self.run(args)
+      if expected_output is not None and expected_output not in output:
+        raise ValueError('Incorrect benchmark output:\n' + output)
+
       if not output_parser or args == ['0']: # if arg is 0, we are not running code, and have no output to parse
         if IGNORE_COMPILATION:
           curr = float(re.search(r'took +([\d\.]+) milliseconds', output).group(1)) / 1000
@@ -118,7 +121,9 @@ class NativeBenchmarker(Benchmarker):
   def build(self, parent, filename, args, shared_args, emcc_args, native_args, native_exec, lib_builder, has_output_parser):
     self.parent = parent
     if lib_builder:
-      native_args += lib_builder(self.name, native=True, env_init={'CC': self.cc, 'CXX': self.cxx, 'CXXFLAGS': "-Wno-c++11-narrowing"})
+      env = {'CC': self.cc, 'CXX': self.cxx, 'CXXFLAGS': "-Wno-c++11-narrowing"}
+      env.update(shared.get_clang_native_env())
+      native_args += lib_builder(self.name, native=True, env_init=env)
     if not native_exec:
       compiler = self.cxx if filename.endswith('cpp') else self.cc
       cmd = [
@@ -199,7 +204,7 @@ class EmscriptenBenchmarker(Benchmarker):
     self.filename = final
 
   def run(self, args):
-    return jsrun.run_js(self.filename, engine=self.engine, args=args, stderr=PIPE, full_output=True, assert_returncode=None)
+    return jsrun.run_js(self.filename, engine=self.engine, args=args, stderr=PIPE, full_output=True)
 
   def get_output_files(self):
     ret = [self.filename]
@@ -332,18 +337,18 @@ class benchmark(RunnerCore):
   save_dir = True
 
   @classmethod
-  def setUpClass(self):
-    super(benchmark, self).setUpClass()
+  def setUpClass(cls):
+    super(benchmark, cls).setUpClass()
 
     fingerprint = ['ignoring compilation' if IGNORE_COMPILATION else 'including compilation', time.asctime()]
     try:
       fingerprint.append('em: ' + run_process(['git', 'show'], stdout=PIPE).stdout.splitlines()[0])
-    except:
+    except Exception:
       pass
     try:
       with chdir(os.path.expanduser('~/Dev/mozilla-central')):
         fingerprint.append('sm: ' + [line for line in run_process(['hg', 'tip'], stdout=PIPE).stdout.splitlines() if 'changeset' in line][0])
-    except:
+    except Exception:
       pass
     fingerprint.append('llvm: ' + LLVM_ROOT)
     print('Running Emscripten benchmarks... [ %s ]' % ' | '.join(fingerprint))
@@ -351,11 +356,10 @@ class benchmark(RunnerCore):
     assert(os.path.exists(CLOSURE_COMPILER))
 
     Building.COMPILER = CLANG
-    Building.COMPILER_TEST_OPTS = [OPTIMIZATIONS]
 
   # avoid depending on argument reception from the commandline
   def hardcode_arguments(self, code):
-    if not code:
+    if not code or 'int main()' in code:
       return code
     main_pattern = 'int main(int argc, char **argv)'
     assert main_pattern in code
@@ -396,7 +400,7 @@ class benchmark(RunnerCore):
       baseline = b
       print('Running benchmarker: ' + b.name)
       b.build(self, filename, args, shared_args, emcc_args, native_args, native_exec, lib_builder, has_output_parser=output_parser is not None)
-      b.bench(args, output_parser, reps)
+      b.bench(args, output_parser, reps, expected_output)
       b.display(baseline)
       b.cleanup()
 
@@ -615,9 +619,9 @@ class benchmark(RunnerCore):
           }
         }
 
-        printf("ok\n");
+        printf("ok %d\n", sum);
 
-        return sum;
+        return 0;
       }
     '''
     self.do_benchmark('ifs', src, 'ok')
@@ -653,7 +657,7 @@ class benchmark(RunnerCore):
 
         printf("ok %d\n", x);
 
-        return x;
+        return 0;
       }
     '''
     self.do_benchmark('conditionals', src, 'ok', reps=TEST_REPS, emcc_args=['-s', 'MINIMAL_RUNTIME=0'])
@@ -881,7 +885,7 @@ class benchmark(RunnerCore):
   def test_matrix_multiply(self):
     def output_parser(output):
       return float(re.search(r'Total elapsed: ([\d\.]+)', output).group(1))
-    self.do_benchmark('matrix_multiply', open(path_from_root('tests', 'matrix_multiply.cpp')).read(), 'Total time:', output_parser=output_parser, shared_args=['-I' + path_from_root('tests')])
+    self.do_benchmark('matrix_multiply', open(path_from_root('tests', 'matrix_multiply.cpp')).read(), 'Total elapsed:', output_parser=output_parser, shared_args=['-I' + path_from_root('tests')])
 
   @non_core
   def test_zzz_java_nbody(self): # tests xmlvm compiled java, including bitcasts of doubles, i64 math, etc.
@@ -964,7 +968,7 @@ class benchmark(RunnerCore):
   def test_zzz_sqlite(self):
     src = open(path_from_root('tests', 'sqlite', 'sqlite3.c'), 'r').read() + open(path_from_root('tests', 'sqlite', 'speedtest1.c'), 'r').read()
 
-    self.do_benchmark('sqlite', src, 'ok.', shared_args=['-I' + path_from_root('tests', 'sqlite')], emcc_args=['-s', 'FILESYSTEM=1'], force_c=True)
+    self.do_benchmark('sqlite', src, 'TOTAL...', shared_args=['-I' + path_from_root('tests', 'sqlite')], emcc_args=['-s', 'FILESYSTEM=1'], force_c=True)
 
   def test_zzz_poppler(self):
     with open('pre.js', 'w') as f:
@@ -979,12 +983,12 @@ class benchmark(RunnerCore):
           '5': 55,
         };
         if (benchmarkArgument === 0) {
-          Module.arguments = ['-?'];
-          Module.printErr = function(){};
+          Module['arguments'] = ['-?'];
+          Module['printErr'] = function(){};
         } else {
           // Add 'filename' after 'input.pdf' to write the output so it can be verified.
-          Module.arguments = ['-scale-to', '1024', 'input.pdf',  '-f', '1', '-l', '' + benchmarkArgumentToPageCount[benchmarkArgument]];
-          Module.postRun = function() {
+          Module['arguments'] = ['-scale-to', '1024', 'input.pdf',  '-f', '1', '-l', '' + benchmarkArgumentToPageCount[benchmarkArgument]];
+          Module['postRun'] = function() {
             var files = [];
             for (var x in FS.root.contents) {
               if (x.startsWith('filename-')) {

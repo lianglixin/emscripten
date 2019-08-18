@@ -145,7 +145,7 @@ def parse_fastcomp_output(backend_output, DEBUG):
 
   try:
     metadata = json.loads(metadata_raw, object_pairs_hook=OrderedDict)
-  except:
+  except ValueError:
     logger.error('emscript: failure to parse metadata output from compiler backend. raw output is: \n' + metadata_raw)
     raise
 
@@ -166,6 +166,14 @@ def parse_fastcomp_output(backend_output, DEBUG):
 
   # functions marked llvm.used in the code are exports requested by the user
   shared.Building.user_requested_exports += metadata['exports']
+
+  # In MINIMAL_RUNTIME stackSave() and stackRestore are JS library functions. If LLVM backend generated
+  # calls to invoke_*() functions that save and restore the stack, we must include the stack functions
+  # explicitly into the build. (In traditional runtime the stack functions are always present, so this
+  # tracking is not needed)
+  if shared.Settings.MINIMAL_RUNTIME and (len(metadata['invokeFuncs']) > 0 or shared.Settings.LINKABLE):
+    shared.Settings.EXPORTED_FUNCTIONS += ['stackSave', 'stackRestore']
+    shared.Settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$stackSave', '$stackRestore']
 
   return funcs, metadata, mem_init
 
@@ -226,8 +234,7 @@ def compiler_glue(metadata, libraries, compiler_engine, temp_files, DEBUG):
   # FIXME: do these one by one as normal js lib funcs
   metadata['declares'] = [i64_func for i64_func in metadata['declares'] if i64_func not in ['getHigh32', 'setHigh32']]
 
-  optimize_syscalls(metadata['declares'], DEBUG)
-  update_settings_glue(metadata)
+  update_settings_glue(metadata, DEBUG)
 
   assert not (metadata['simd'] and shared.Settings.WASM), 'SIMD is used, but not supported in WASM mode yet'
   assert not (shared.Settings.SIMD and shared.Settings.WASM), 'SIMD is requested, but not supported in WASM mode yet'
@@ -337,7 +344,7 @@ def function_tables_and_exports(funcs, metadata, mem_init, glue, forwarded_data,
   # calculate globals
   try:
     del forwarded_json['Variables']['globals']['_llvm_global_ctors'] # not a true variable
-  except:
+  except KeyError:
     pass
   if not shared.Settings.RELOCATABLE:
     global_vars = metadata['externs']
@@ -443,7 +450,7 @@ def collapse_redundant_vars(code):
   old_code = ''
   while code != old_code: # Repeated vars overlap, so can't run in one regex pass. Runs in O(log(N)) time
     old_code = code
-    code = re.sub('(var [^;]*);\s*var ', r'\1,\n  ', code)
+    code = re.sub(r'(var [^;]*);\s*var ', r'\1,\n  ', code)
   return code
 
 
@@ -581,10 +588,6 @@ def create_backend_cmd(infile, temp_js):
     args += ['-enable-emscripten-cpp-exceptions']
     if shared.Settings.DISABLE_EXCEPTION_CATCHING == 2:
       args += ['-emscripten-cpp-exceptions-whitelist=' + ','.join(shared.Settings.EXCEPTION_CATCHING_WHITELIST or ['fake'])]
-  if shared.Settings.ASYNCIFY:
-    args += ['-emscripten-asyncify']
-    args += ['-emscripten-asyncify-functions=' + ','.join(shared.Settings.ASYNCIFY_FUNCTIONS)]
-    args += ['-emscripten-asyncify-whitelist=' + ','.join(shared.Settings.ASYNCIFY_WHITELIST)]
   if not shared.Settings.EXIT_RUNTIME:
     args += ['-emscripten-no-exit-runtime']
   if shared.Settings.WORKAROUND_IOS_9_RIGHT_SHIFT_BUG:
@@ -611,20 +614,24 @@ def optimize_syscalls(declares, DEBUG):
   if any(shared.Settings[s] for s in relevant_settings):
     return
 
-  syscall_prefix = '__syscall'
-  syscall_numbers = [d[len(syscall_prefix):] for d in declares if d.startswith(syscall_prefix)]
-  syscalls = [int(s) for s in syscall_numbers if is_int(s)]
-  if set(syscalls).issubset(set([6, 54, 140, 146])): # close, ioctl, llseek, writev
-    if DEBUG:
-      logger.debug('very limited syscalls (%s) so disabling full filesystem support', ', '.join(str(s) for s in syscalls))
+  if shared.Settings.FILESYSTEM == 0:
+    # without filesystem support, it doesn't matter what syscalls need
     shared.Settings.SYSCALLS_REQUIRE_FILESYSTEM = 0
+  else:
+    syscall_prefix = '__syscall'
+    syscall_numbers = [d[len(syscall_prefix):] for d in declares if d.startswith(syscall_prefix)]
+    syscalls = [int(s) for s in syscall_numbers if is_int(s)]
+    if set(syscalls).issubset(set([6, 54, 140, 146])): # close, ioctl, llseek, writev
+      if DEBUG:
+        logger.debug('very limited syscalls (%s) so disabling full filesystem support', ', '.join(str(s) for s in syscalls))
+      shared.Settings.SYSCALLS_REQUIRE_FILESYSTEM = 0
 
 
 def is_int(x):
   try:
     int(x)
     return True
-  except:
+  except ValueError:
     return False
 
 
@@ -637,7 +644,9 @@ def align_static_bump(metadata):
   return metadata['staticBump']
 
 
-def update_settings_glue(metadata):
+def update_settings_glue(metadata, DEBUG):
+  optimize_syscalls(metadata['declares'], DEBUG)
+
   if shared.Settings.CYBERDWARF:
     shared.Settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.append("cyberdwarf_Debugger")
     shared.Settings.EXPORTED_FUNCTIONS.append("cyberdwarf_Debugger")
@@ -692,6 +701,7 @@ def update_settings_glue(metadata):
       # size does not include the reserved slot at zero for the null pointer.
       # Instead we use __table_base to offset the elements by 1.
       shared.Settings.WASM_TABLE_SIZE += 1
+    shared.Settings.MAIN_READS_PARAMS = metadata['mainReadsParams']
 
 
 # static code hooks
@@ -904,8 +914,6 @@ def get_exported_implemented_functions(all_exported_functions, all_implemented, 
       funcs += ['emterpret']
       if shared.Settings.EMTERPRETIFY_ASYNC:
         funcs += ['setAsyncState', 'emtStackSave', 'emtStackRestore', 'getEmtStackMax', 'setEmtStackMax']
-    if shared.Settings.ASYNCIFY and need_asyncify(funcs):
-      funcs += ['setAsync']
 
   return sorted(set(funcs))
 
@@ -1272,24 +1280,12 @@ def create_mftCall_funcs(function_table_data):
 
 
 def get_function_pointer_error(sig, function_table_sigs):
-  if shared.Settings.ASSERTIONS <= 1:
-    extra = ' err("Build with ASSERTIONS=2 for more info.");'
-    pointer = ' '
+  if shared.Settings.ASSERTIONS == 0:
+    # Release build: do the most minimal sized abort possible
+    return "abort();"
   else:
-    pointer = ' \'" + x + "\' '
-    extra = ' err("This pointer might make sense in another type signature: '
-    # sort signatures, attempting to show most likely related ones first
-    sigs = list(function_table_sigs)
-    sigs.sort(key=signature_sort_key(sig))
-    for other in sigs:
-      if other != sig:
-        extra += other + ': " + debug_table_' + other + '[x] + "  '
-    extra += '"); '
-  return 'err("Invalid function pointer' + pointer + 'called with signature \'' + sig + '\'. ' + \
-         'Perhaps this is an invalid value (e.g. caused by calling a virtual method on a NULL pointer)? ' + \
-         'Or calling a function with an incorrect type, which will fail? ' + \
-         '(it is worth building your source files with -Werror (warnings are errors), as warnings can indicate undefined behavior which can cause this)' + \
-         '"); ' + extra
+    # ASSERTIONS-enabled build, identify the pointer and the failing signature.
+    return "abortFnPtrError(x, '" + sig + "');"
 
 
 def signature_sort_key(sig):
@@ -1474,10 +1470,6 @@ def make_simd_types(metadata):
   }
 
 
-def need_asyncify(exported_implemented_functions):
-  return '_emscripten_alloc_async_context' in exported_implemented_functions
-
-
 def asm_safe_heap():
   """optimized safe heap in asm, when we can"""
   return shared.Settings.SAFE_HEAP and not shared.Settings.SAFE_HEAP_LOG and not shared.Settings.RELOCATABLE
@@ -1492,14 +1484,17 @@ def create_asm_setup(debug_tables, function_table_data, invoke_function_names, m
 
   asm_setup = ''
   if shared.Settings.ASSERTIONS >= 2:
+    debug_tables_map = 'var debug_tables = {\n'
     for sig in function_table_data:
       # if the table is empty, debug_tables will not contain it
       body = debug_tables.get(sig, [])
-      asm_setup += '\nvar debug_table_' + sig + ' = ' + json.dumps(body) + ';'
+      asm_setup += 'var debug_table_' + sig + ' = [' + ','.join(['0' if x == '0' else "'" + x.replace("'", '"') + "'" for x in body]) + '];\n'
+      debug_tables_map += "  '" + sig + "': debug_table_" + sig + ',\n'
+    asm_setup += debug_tables_map + '};\n'
 
   if shared.Settings.ASSERTIONS:
     for sig in function_table_sigs:
-      asm_setup += '\nfunction nullFunc_' + sig + '(x) { ' + get_function_pointer_error(sig, function_table_sigs) + 'abort(x) }\n'
+      asm_setup += 'function nullFunc_' + sig + '(x) { ' + get_function_pointer_error(sig, function_table_sigs) + ' }\n'
 
   if shared.Settings.RELOCATABLE:
     if not shared.Settings.SIDE_MODULE:
@@ -1597,11 +1592,6 @@ def create_basic_vars(exported_implemented_functions, forwarded_json, metadata):
       # wasm side modules have a specific convention for these
       basic_vars += ['__memory_base', '__table_base']
 
-  # See if we need ASYNCIFY functions
-  # We might not need them even if ASYNCIFY is enabled
-  if need_asyncify(exported_implemented_functions):
-    basic_vars += ['___async', '___async_unwind', '___async_retval', '___async_cur_frame']
-
   if shared.Settings.EMTERPRETIFY:
     basic_vars += ['EMTSTACKTOP', 'EMT_STACK_MAX', 'eb']
 
@@ -1670,8 +1660,7 @@ def create_the_global(metadata):
 
 RUNTIME_ASSERTIONS = '''
   assert(runtimeInitialized, 'you need to wait for the runtime to be ready (e.g. wait for main() to be called)');
-  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');
-'''
+  assert(!runtimeExited, 'the runtime was exited (use NO_EXIT_RUNTIME to keep it alive after main() exits)');'''
 
 
 def create_receiving(function_table_data, function_tables_defs, exported_implemented_functions, initializers):
@@ -1680,12 +1669,20 @@ def create_receiving(function_table_data, function_tables_defs, exported_impleme
     runtime_assertions = ''
   else:
     runtime_assertions = RUNTIME_ASSERTIONS
-    # assert on the runtime being in a valid state when calling into compiled code. The only exceptions are
-    # some support code
-    receiving = [f for f in exported_implemented_functions if f not in ('_memcpy', '_memset', '_emscripten_replace_memory', '__start_module')]
-    receiving = '\n'.join('var real_' + s + ' = asm["' + s + '"]; asm["' + s + '''"] = function() {''' + runtime_assertions + '''  return real_''' + s + '''.apply(null, arguments);
+    # assert on the runtime being in a valid state when calling into compiled code. The only exceptions are some support code.
+    # WASM=1 already inserts runtime assertions, so no need to do it again here (see create_receiving_wasm)
+    if not shared.Settings.WASM:
+      receiving_functions = [f for f in exported_implemented_functions if f not in ('_memcpy', '_memset', '_emscripten_replace_memory', '__start_module')]
+
+      wrappers = []
+      for name in receiving_functions:
+        wrappers.append('''\
+var real_%(name)s = asm["%(name)s"];
+asm["%(name)s"] = function() {%(runtime_assertions)s
+  return real_%(name)s.apply(null, arguments);
 };
-''' for s in receiving)
+''' % {'name': name, 'runtime_assertions': runtime_assertions})
+      receiving = '\n'.join(wrappers)
 
   shared.Settings.MODULE_EXPORTS = module_exports = exported_implemented_functions + function_tables(function_table_data)
 
@@ -1723,7 +1720,15 @@ def create_receiving(function_table_data, function_tables_defs, exported_impleme
 
       receiving += 'for(var __exportedFunc in asm) ' + global_object + '[__exportedFunc] = ' + module_assign + 'asm[__exportedFunc];\n'
   else:
-    receiving += 'Module["asm"] = asm;\n' + '\n'.join(['var ' + s + ' = Module["' + s + '"] = function() {' + runtime_assertions + '  return Module["asm"]["' + s + '"].apply(null, arguments) };' for s in module_exports]) + '\n'
+    receiving += 'Module["asm"] = asm;\n'
+    wrappers = []
+    for name in module_exports:
+      wrappers.append('''\
+var %(name)s = Module["%(name)s"] = function() {%(runtime_assertions)s
+  return Module["asm"]["%(name)s"].apply(null, arguments)
+};
+''' % {'name': name, 'runtime_assertions': runtime_assertions})
+    receiving += '\n'.join(wrappers)
 
   if shared.Settings.EXPORT_FUNCTION_TABLES and not shared.Settings.WASM:
     for table in function_table_data.values():
@@ -1851,13 +1856,6 @@ function establishStackSpace(stackBase, stackMax) {
     # MINIMAL_RUNTIME moves stack functions to library.
     funcs = []
 
-  if need_asyncify(exports):
-    funcs.append('''
-function setAsync() {
-  ___async = 1;
-}
-''')
-
   if shared.Settings.EMTERPRETIFY:
     funcs.append('''
 function emterpret(pc) { // this will be replaced when the emterpreter code is generated; adding it here allows validation until then
@@ -1969,8 +1967,8 @@ def create_asm_start_pre(asm_setup, the_global, sending, metadata):
   if shared.Settings.USE_PTHREADS and not shared.Settings.WASM:
     shared_array_buffer = "asmGlobalArg['Atomics'] = Atomics;"
 
-  module_global = 'var asmGlobalArg = ' + the_global
-  module_library = 'var asmLibraryArg = ' + sending
+  module_global = 'var asmGlobalArg = ' + the_global + ';'
+  module_library = 'var asmLibraryArg = ' + sending + ';'
 
   asm_function_top = ('// EMSCRIPTEN_START_ASM\n'
                       'var asm = (/** @suppress {uselessCode} */ function(global, env, buffer) {')
@@ -2143,19 +2141,14 @@ def emscript_wasm_backend(infile, outfile, memfile, libraries, compiler_engine,
   #   * Use the metadata to generate the JS glue that goes with the wasm
 
   metadata = finalize_wasm(temp_files, infile, outfile, memfile, DEBUG)
+
+  update_settings_glue(metadata, DEBUG)
+
   if shared.Settings.SIDE_MODULE:
     return
 
-  # optimize syscalls
-
-  optimize_syscalls(metadata['declares'], DEBUG)
-
-  # js compiler
-
   if DEBUG:
     logger.debug('emscript: js compiler glue')
-
-  update_settings_glue(metadata)
 
   if DEBUG:
     t = time.time()
@@ -2194,6 +2187,10 @@ def emscript_wasm_backend(infile, outfile, memfile, libraries, compiler_engine,
   shared.Settings.EXPORTED_FUNCTIONS = forwarded_json['EXPORTED_FUNCTIONS']
 
   all_implemented = metadata['exports']
+
+  if shared.Settings.ASYNCIFY:
+    all_implemented += ['asyncify_start_unwind', 'asyncify_stop_unwind', 'asyncify_start_rewind', 'asyncify_stop_rewind']
+
   check_all_implemented([asmjs_mangle(f) for f in all_implemented], pre)
 
   asm_consts, asm_const_funcs = create_asm_consts_wasm(forwarded_json, metadata)
@@ -2214,7 +2211,7 @@ def emscript_wasm_backend(infile, outfile, memfile, libraries, compiler_engine,
 
   try:
     del forwarded_json['Variables']['globals']['_llvm_global_ctors'] # not a true variable
-  except:
+  except KeyError:
     pass
 
   sending = create_sending_wasm(invoke_funcs, forwarded_json, metadata)
@@ -2226,6 +2223,16 @@ def emscript_wasm_backend(infile, outfile, memfile, libraries, compiler_engine,
   module = None
 
   outfile.close()
+
+
+def remove_trailing_zeros(memfile):
+  with open(memfile, 'rb') as f:
+    mem_data = f.read()
+  end = len(mem_data)
+  while end > 0 and (mem_data[end - 1] == b'\0' or mem_data[end - 1] == 0):
+    end -= 1
+  with open(memfile, 'wb') as f:
+    f.write(mem_data[:end])
 
 
 def finalize_wasm(temp_files, infile, outfile, memfile, DEBUG):
@@ -2260,7 +2267,7 @@ def finalize_wasm(temp_files, infile, outfile, memfile, DEBUG):
   # tell binaryen to look at the features section, and if there isn't one, to use MVP
   # (which matches what llvm+lld has given us)
   cmd += ['--detect-features']
-  if shared.Settings.DEBUG_LEVEL >= 2 or shared.Settings.PROFILING_FUNCS:
+  if shared.Settings.DEBUG_LEVEL >= 2 or shared.Settings.PROFILING_FUNCS or shared.Settings.EMIT_SYMBOL_MAP or shared.Settings.ASYNCIFY_WHITELIST or shared.Settings.ASYNCIFY_BLACKLIST:
     cmd.append('-g')
   if shared.Settings.LEGALIZE_JS_FFI != 1:
     cmd.append('--no-legalize-javascript-ffi')
@@ -2284,12 +2291,20 @@ def finalize_wasm(temp_files, infile, outfile, memfile, DEBUG):
       cmd.append('--global-base=0')
     else:
       cmd.append('--global-base=%s' % shared.Settings.GLOBAL_BASE)
-    cmd.append('--initial-stack-pointer=%d' % Memory().stack_base)
+  if shared.Settings.SAFE_STACK:
+    cmd.append('--check-stack-overflow')
   shared.print_compiler_stage(cmd)
   stdout = shared.check_call(cmd, stdout=subprocess.PIPE).stdout
   if write_source_map:
     debug_copy(wasm + '.map', 'post_finalize.map')
   debug_copy(wasm, 'post_finalize.wasm')
+
+  if not shared.Settings.MEM_INIT_IN_WASM:
+    # we have a separate .mem file. binaryen did not strip any trailing zeros,
+    # because it's an ABI question as to whether it is valid to do so or not.
+    # we can do so here, since we make sure to zero out that memory (even in
+    # the dynamic linking case, our loader zeros it out)
+    remove_trailing_zeros(memfile)
 
   return load_metadata_wasm(stdout, DEBUG)
 
@@ -2332,7 +2347,7 @@ function _emscripten_asm_const_%s(code, sig_ptr, argbuf) {
       buf += 8;
     } else if (c == 'i') {
       buf = align_to(buf, 4);
-      args.push(HEAPU32[(buf >> 2)]);
+      args.push(HEAP32[(buf >> 2)]);
       buf += 4;
     }
   }
@@ -2385,7 +2400,9 @@ def create_sending_wasm(invoke_funcs, forwarded_json, metadata):
     # symbols.  Emscripten currently expects symbols to start with '_' so we
     # artificially add them to the output of emscripten-wasm-finalize and them
     # strip them again here.
-    if g.startswith('_'):
+    # note that we don't do this for EM_JS functions (which, rarely, may have
+    # a '_' prefix)
+    if g.startswith('_') and g not in metadata['emJsFuncs']:
       return g[1:]
     return g
 
@@ -2409,9 +2426,12 @@ def create_receiving_wasm(exports):
     # assert on the runtime being in a valid state when calling into compiled code. The only exceptions are
     # some support code
     for e in exports:
-      receiving.append('''var real_%(mangled)s = asm["%(e)s"]; asm["%(e)s"] = function() { %(assertions)s
-return real_%(mangled)s.apply(null, arguments);
-};''' % {'mangled': asmjs_mangle(e), 'e': e, 'assertions': runtime_assertions})
+      receiving.append('''\
+var real_%(mangled)s = asm["%(e)s"];
+asm["%(e)s"] = function() {%(assertions)s
+  return real_%(mangled)s.apply(null, arguments);
+};
+''' % {'mangled': asmjs_mangle(e), 'e': e, 'assertions': runtime_assertions})
 
   if not shared.Settings.SWAPPABLE_ASM_MODULE:
     for e in exports:
@@ -2419,7 +2439,11 @@ return real_%(mangled)s.apply(null, arguments);
   else:
     receiving.append('Module["asm"] = asm;')
     for e in exports:
-      receiving.append('var %(mangled)s = Module["%(mangled)s"] = function() { %(assertions)s return Module["asm"]["%(e)s"].apply(null, arguments) };' % {'mangled': asmjs_mangle(e), 'e': e, 'assertions': runtime_assertions})
+      receiving.append('''\
+var %(mangled)s = Module["%(mangled)s"] = function() {%(assertions)s
+  return Module["asm"]["%(e)s"].apply(null, arguments)
+};
+''' % {'mangled': asmjs_mangle(e), 'e': e, 'assertions': runtime_assertions})
 
   return '\n'.join(receiving) + '\n'
 
@@ -2464,6 +2488,7 @@ def load_metadata_wasm(metadata_raw, DEBUG):
     'asmConsts': {},
     'invokeFuncs': [],
     'features': [],
+    'mainReadsParams': 1,
   }
 
   assert 'tableSize' in metadata_json.keys()
@@ -2547,13 +2572,13 @@ def run(infile, outfile, memfile, libraries):
   if not shared.Settings.BOOTSTRAPPING_STRUCT_INFO and not shared.Settings.ONLY_MY_CODE:
     generated_struct_info_name = 'generated_struct_info.json'
 
-    def ensure_struct_info():
+    def generate_struct_info():
       with ToolchainProfiler.profile_block('gen_struct_info'):
         out = shared.Cache.get_path(generated_struct_info_name)
-        gen_struct_info.main(['-qo', out, path_from_root('src', 'struct_info.json')])
+        gen_struct_info.main(['-q', '-c', '-o', out])
         return out
 
-    shared.Settings.STRUCT_INFO = shared.Cache.get(generated_struct_info_name, ensure_struct_info)
+    shared.Settings.STRUCT_INFO = shared.Cache.get(generated_struct_info_name, generate_struct_info)
   # do we need an else, to define it for the bootstrap case?
 
   outfile_obj = open(outfile, 'w')
